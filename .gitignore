@@ -1,0 +1,93 @@
+# Data files and directories
+data/
+*.csv
+*.json.gz
+*.parquet
+*.arrow
+
+# Visualization files
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.pdf
+*.eps
+experiments/**/visualizations/
+**/visualizations/
+
+# Claude files
+.claude/
+*.MD
+claude.MD
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model files
+*.bin
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+models/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# Experiments results (but keep the directory structure and README files)
+experiments/**/models/
+experiments/**/logs/
+experiments/**/checkpoints/
+experiments/**/results/
+experiments/**/outputs/
+experiments/**/*.json
