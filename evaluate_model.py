@@ -98,7 +98,7 @@ class ComprehensiveEvaluator:
         """
         Run comprehensive evaluation on all metrics
         """
-        print("🔍 Starting comprehensive evaluation...")
+        print("Starting comprehensive evaluation...")
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -109,12 +109,12 @@ class ComprehensiveEvaluator:
             if len(query_ids) > self.config['sample_size']:
                 sampled_ids = np.random.choice(query_ids, self.config['sample_size'], replace=False)
                 test_data = test_data.filter(lambda x: x['query_id'] in sampled_ids)
-                print(f"📊 Sampled {self.config['sample_size']} queries for evaluation")
+                print(f"Sampled {self.config['sample_size']} queries for evaluation")
 
         # Prepare query-grouped data
-        print("📦 Preparing query-grouped data...")
+        print("Preparing query-grouped data...")
         query_data = self.prepare_query_grouped_data(test_data)
-        print(f"📊 Evaluating on {len(query_data)} unique queries")
+        print(f"Evaluating on {len(query_data)} unique queries")
 
         results = {
             'generation_metrics': {},
@@ -124,23 +124,23 @@ class ComprehensiveEvaluator:
         }
 
         # Generate predictions
-        print("📝 Generating predictions...")
+        print("Generating predictions...")
         predictions = self.generate_predictions(model, query_data)
 
         # Evaluate generation quality
-        print("📊 Evaluating generation metrics...")
+        print("Evaluating generation metrics...")
         results['generation_metrics'] = self.evaluate_generation_metrics(
             predictions, query_data
         )
 
         # Evaluate ranking performance
-        print("🏆 Evaluating ranking metrics...")
+        print("Evaluating ranking metrics...")
         results['ranking_metrics'] = self.evaluate_ranking_metrics(
             model, query_data
         )
 
         # Quality analysis
-        print("🔬 Analyzing explanation quality...")
+        print("Analyzing explanation quality...")
         results['quality_analysis'] = self.analyze_explanation_quality(
             predictions, query_data
         )
@@ -153,10 +153,10 @@ class ComprehensiveEvaluator:
 
         # Create visualizations
         if self.config['create_visualizations']:
-            print("📈 Creating visualizations...")
+            print("Creating visualizations...")
             self.create_visualizations(results, output_dir)
 
-        print(f"✅ Evaluation complete! Results saved to {output_dir}")
+        print(f"Evaluation complete! Results saved to {output_dir}")
         return results
 
     def generate_predictions(self, model, query_data: Dict) -> List[Dict]:
@@ -498,6 +498,72 @@ class ComprehensiveEvaluator:
 
         return stats
 
+    def compute_ranking_rewards_with_loss(self, queries, responses, ranking_model):
+        """
+        Use ranking loss as negative reward for PPO
+        """
+        # Import ComprehensiveRankingLoss (assumes it's defined elsewhere or needs to be created)
+        from ranking_models import RankingLosses
+
+        # Create a combined loss function
+        def combined_loss(scores, labels):
+            losses = {}
+
+            # Use multi-margin hinge loss instead of simple pairwise
+            losses['hinge'] = RankingLosses.multi_margin_hinge_loss(scores, labels) if len(scores) > 1 else torch.tensor(0.0)
+
+            losses['listnet'] = RankingLosses.listnet_loss(scores.unsqueeze(0), labels.unsqueeze(0))
+            losses['ndcg'] = RankingLosses.approxndcg_loss(scores.unsqueeze(0), labels.unsqueeze(0))
+
+            # Weighted combination
+            total_loss = 0.4 * losses['hinge'] + 0.3 * losses['listnet'] + 0.3 * losses['ndcg']
+            return total_loss, losses
+
+        all_rewards = []
+
+        for query, response_list in zip(queries, responses):
+            # Score all responses
+            if hasattr(ranking_model, 'rank_explanations'):
+                scores = torch.tensor(ranking_model.rank_explanations(query, response_list))
+            else:
+                # Fallback to simple scoring
+                scores = torch.tensor([len(r.split()) / 50.0 for r in response_list])
+
+            # Get pseudo-labels based on heuristics or DS critique
+            pseudo_labels = self.get_quality_estimates(query, response_list)
+
+            # Compute loss
+            loss, loss_dict = combined_loss(scores, pseudo_labels)
+
+            # Convert to rewards (negative loss)
+            rewards = -loss.detach()
+
+            # Add per-response rewards based on ranking position
+            sorted_indices = scores.argsort(descending=True)
+            position_rewards = torch.zeros_like(scores)
+            for rank, idx in enumerate(sorted_indices):
+                position_rewards[idx] = 1.0 - (rank / len(scores))
+
+            # Combine loss-based and position-based rewards
+            combined_rewards = 0.6 * (-loss) + 0.4 * position_rewards
+
+            all_rewards.extend(combined_rewards.tolist())
+
+        return torch.tensor(all_rewards)
+
+    def get_quality_estimates(self, query: str, responses: List[str]) -> torch.Tensor:
+        """
+        Estimate quality scores for responses using heuristics
+        """
+        quality_scores = []
+
+        for response in responses:
+            # Use the compute_explanation_quality method
+            quality = self.compute_explanation_quality(query, response)
+            quality_scores.append(quality)
+
+        return torch.tensor(quality_scores)
+
     def save_results(self, results: Dict, output_dir: str):
         """Save evaluation results to files"""
         # Save main results
@@ -538,7 +604,7 @@ class ComprehensiveEvaluator:
         if results['dataset_stats']:
             self.plot_dataset_stats(results['dataset_stats'], viz_dir)
 
-        print(f"📊 Visualizations saved to {viz_dir}")
+        print(f"Visualizations saved to {viz_dir}")
 
     def plot_generation_metrics(self, metrics: Dict, output_dir: str):
         """Plot generation metrics"""
@@ -733,12 +799,12 @@ def evaluate_model_comprehensive(model, test_dataset_path: str, output_dir: str,
     print("="*60)
 
     if 'dataset_stats' in results:
-        print(f"\n📊 Dataset Statistics:")
+        print(f"\nDataset Statistics:")
         print(f"  Number of queries: {results['dataset_stats']['num_queries']}")
         print(f"  Avg candidates per query: {results['dataset_stats']['candidates_per_query']['mean']:.1f}")
 
     if 'generation_metrics' in results and 'error' not in results['generation_metrics']:
-        print("\n📊 Generation Metrics:")
+        print("\nGeneration Metrics:")
         for metric, value in results['generation_metrics'].items():
             if isinstance(value, dict):
                 for sub_metric, sub_value in value.items():
@@ -747,20 +813,20 @@ def evaluate_model_comprehensive(model, test_dataset_path: str, output_dir: str,
                 print(f"  {metric}: {value:.4f}")
 
     if 'ranking_metrics' in results and 'error' not in results['ranking_metrics']:
-        print("\n🏆 Ranking Metrics:")
+        print("\nRanking Metrics:")
         for metric, value in results['ranking_metrics'].items():
             print(f"  {metric}: {value:.4f}")
 
     if 'quality_analysis' in results and 'overall' in results['quality_analysis']:
         overall_quality = results['quality_analysis']['overall']
-        print(f"\n🔬 Quality Analysis:")
+        print(f"\nQuality Analysis:")
         print(f"  Mean Quality: {overall_quality['mean']:.4f}")
         print(f"  Median Quality: {overall_quality['median']:.4f}")
         print(f"  Std Quality: {overall_quality['std']:.4f}")
 
         if 'length_stats' in results['quality_analysis']:
             length_stats = results['quality_analysis']['length_stats']
-            print(f"\n📏 Length Statistics:")
+            print(f"\nLength Statistics:")
             print(f"  Mean length: {length_stats['mean']:.1f} words")
             print(f"  Median length: {length_stats['median']:.1f} words")
             print(f"  Range: {length_stats['min']}-{length_stats['max']} words")
@@ -794,4 +860,4 @@ if __name__ == "__main__":
         config=eval_config
     )
 
-    print("\n✅ Evaluation complete! Check experiments/evaluation_test/ for results.")
+    print("\nEvaluation completa! Check experiments/evaluation_test/ for results.")

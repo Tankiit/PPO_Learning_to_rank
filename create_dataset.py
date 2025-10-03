@@ -475,6 +475,56 @@ class ComprehensiveDatasetBuilder:
 
         return candidates
 
+    def create_pairwise_ranking_data(self, query_data: Dict) -> List[Dict]:
+        """
+        Create pairwise comparisons for ranking training
+        """
+        candidates = self.create_ranking_rows(query_data)
+        pairs = []
+
+        # Create all pairwise comparisons
+        for i in range(len(candidates)):
+            for j in range(i + 1, len(candidates)):
+                cand_i = candidates[i]
+                cand_j = candidates[j]
+
+                if cand_i['quality_score'] != cand_j['quality_score']:
+                    # Higher score is "better"
+                    if cand_i['quality_score'] > cand_j['quality_score']:
+                        better, worse = cand_i, cand_j
+                    else:
+                        better, worse = cand_j, cand_i
+
+                    pairs.append({
+                        'query_id': cand_i['query_id'],
+                        'query_text': cand_i['query_text'],
+                        'better_explanation': better['candidate'],
+                        'worse_explanation': worse['candidate'],
+                        'score_diff': abs(better['quality_score'] - worse['quality_score']),
+                        'better_method': better['generation_method'],
+                        'worse_method': worse['generation_method'],
+                    })
+
+        return pairs
+
+    def create_listwise_ranking_data(self, query_data: Dict) -> Dict:
+        """
+        Create listwise ranking data with all candidates
+        """
+        candidates = self.create_ranking_rows(query_data)
+
+        # Sort by quality score (descending)
+        candidates_sorted = sorted(candidates, key=lambda x: x['quality_score'], reverse=True)
+
+        return {
+            'query_id': query_data.get('query_id'),
+            'query_text': candidates[0]['query_text'],
+            'candidates': [c['candidate'] for c in candidates_sorted],
+            'scores': [c['quality_score'] for c in candidates_sorted],
+            'ranking': list(range(len(candidates_sorted))),  # 0 is best
+            'methods': [c['generation_method'] for c in candidates_sorted]
+        }
+
     def _row(self, qid, source, premise, hypothesis, label, qtext, candidate, qscore, method):
         return {
             "query_id": qid,

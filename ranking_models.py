@@ -149,6 +149,163 @@ class RankingRewardModel(nn.Module):
         return loss
 
 
+class RankingLosses:
+    @staticmethod
+    def pairwise_hinge_loss(scores_pos, scores_neg, margin=1.0):
+        """Standard pairwise hinge loss for ranking"""
+        return torch.relu(margin - (scores_pos - scores_neg)).mean()
+
+    @staticmethod
+    def weighted_hinge_loss(scores_pos, scores_neg, weights, margin=1.0):
+        """Weighted hinge loss based on quality score differences"""
+        losses = torch.relu(margin - (scores_pos - scores_neg))
+        return (losses * weights).mean()
+
+    @staticmethod
+    def multi_margin_hinge_loss(scores, labels, margins=None):
+        """Different margins based on label differences"""
+        if margins is None:
+            # Default: larger margin for bigger quality differences
+            margins = {1: 0.5, 2: 1.0, 3: 1.5, 4: 2.0}
+
+        batch_size = scores.size(0)
+        losses = []
+
+        for i in range(batch_size):
+            for j in range(i+1, batch_size):
+                if labels[i] > labels[j]:
+                    diff = int(labels[i] - labels[j])
+                    margin = margins.get(diff, 1.0)
+                    loss = torch.relu(margin - (scores[i] - scores[j]))
+                    losses.append(loss)
+
+        return torch.stack(losses).mean() if losses else torch.tensor(0.0)
+
+    @staticmethod
+    def ranknet_loss(scores_i, scores_j, labels_i, labels_j):
+        """RankNet loss (cross-entropy on pairwise preferences)"""
+        # Compute target probabilities
+        P_ij = torch.sigmoid(labels_i - labels_j)
+
+        # Compute predicted probabilities
+        s_ij = scores_i - scores_j
+
+        # Cross entropy loss
+        loss = -P_ij * torch.log(torch.sigmoid(s_ij)) - (1 - P_ij) * torch.log(1 - torch.sigmoid(s_ij))
+        return loss.mean()
+
+    @staticmethod
+    def lambdarank_loss(scores, labels, ndcg_gains=None):
+        """LambdaRank loss - RankNet weighted by NDCG changes"""
+        if ndcg_gains is None:
+            ndcg_gains = 2**labels - 1  # Default DCG gains
+
+        batch_size = scores.size(0)
+        device = scores.device
+
+        # Compute pairwise probabilities
+        scores_diff = scores.unsqueeze(1) - scores.unsqueeze(0)  # [B, B]
+        labels_diff = labels.unsqueeze(1) - labels.unsqueeze(0)  # [B, B]
+
+        # Only consider pairs where labels differ
+        mask = labels_diff > 0
+
+        # RankNet probabilities
+        P_ij = torch.sigmoid(labels_diff)
+        s_ij = torch.sigmoid(scores_diff)
+
+        # Compute position discounts
+        ranks = scores.argsort(descending=True).argsort() + 1
+        discounts = 1.0 / torch.log2(ranks.float() + 1)
+
+        # NDCG change if positions were swapped
+        delta_ndcg = torch.abs(
+            (ndcg_gains.unsqueeze(1) - ndcg_gains.unsqueeze(0)) *
+            (discounts.unsqueeze(1) - discounts.unsqueeze(0))
+        )
+
+        # Weighted loss
+        loss = -delta_ndcg * (P_ij * torch.log(s_ij + 1e-10) + (1 - P_ij) * torch.log(1 - s_ij + 1e-10))
+
+        return loss[mask].mean() if mask.any() else torch.tensor(0.0, device=device)
+
+    @staticmethod
+    def listnet_loss(scores, labels, temp=1.0):
+        """ListNet loss - KL divergence between score distributions"""
+        # Convert to probabilities
+        y_pred = torch.softmax(scores / temp, dim=-1)
+        y_true = torch.softmax(labels / temp, dim=-1)
+
+        # KL divergence
+        return torch.sum(y_true * torch.log(y_true / (y_pred + 1e-10)), dim=-1).mean()
+
+    @staticmethod
+    def listmle_loss(scores, labels, eps=1e-10):
+        """ListMLE loss - likelihood of ground truth permutation"""
+        # Sort by true labels
+        sorted_labels, indices = labels.sort(dim=-1, descending=True)
+        sorted_scores = scores.gather(dim=-1, index=indices)
+
+        # Compute log likelihood
+        max_scores = sorted_scores.max(dim=-1, keepdim=True)[0]
+        exp_scores = torch.exp(sorted_scores - max_scores)
+
+        cumsum_exp = exp_scores.flip(dims=[-1]).cumsum(dim=-1).flip(dims=[-1])
+        log_prob = sorted_scores - max_scores - torch.log(cumsum_exp + eps)
+
+        # Mask out equal labels
+        mask = sorted_labels[..., :-1] > sorted_labels[..., 1:]
+        log_prob = log_prob[..., :-1] * mask
+
+        return -log_prob.sum(dim=-1).mean()
+
+    @staticmethod
+    def approxndcg_loss(scores, labels, alpha=5.0):
+        """ApproxNDCG - smooth approximation of NDCG"""
+        n = scores.size(1)
+        device = scores.device
+
+        # Smooth ranking function
+        pairwise_diff = scores.unsqueeze(2) - scores.unsqueeze(1)
+        pairwise_prob = torch.sigmoid(alpha * pairwise_diff)
+
+        # Approximate rank
+        approx_rank = 1 + pairwise_prob.sum(dim=1)
+
+        # Compute gains and discounts
+        gains = 2**labels - 1
+        discounts = 1 / torch.log2(approx_rank + 1)
+
+        # Approximate DCG
+        approx_dcg = (gains * discounts).sum(dim=1)
+
+        # Ideal DCG
+        ideal_gains, _ = gains.sort(dim=1, descending=True)
+        ideal_discounts = 1 / torch.log2(torch.arange(2, n + 2, device=device).float())
+        ideal_dcg = (ideal_gains * ideal_discounts).sum(dim=1)
+
+        # NDCG loss
+        return 1 - (approx_dcg / (ideal_dcg + 1e-10)).mean()
+
+    @staticmethod
+    def softrank_loss(scores, labels, temp=0.1):
+        """SoftRank - differentiable ranking"""
+        # Compute soft permutation matrix
+        n = scores.size(1)
+        scores_repeated_1 = scores.unsqueeze(2).repeat(1, 1, n)
+        scores_repeated_2 = scores.unsqueeze(1).repeat(1, n, 1)
+
+        P = torch.sigmoid((scores_repeated_1 - scores_repeated_2) / temp)
+        P = P * (1 - torch.eye(n, device=scores.device))
+
+        # Soft ranks
+        soft_ranks = 1 + P.sum(dim=2)
+
+        # Ranking loss
+        target_ranks = (-labels).argsort(dim=1).argsort(dim=1).float() + 1
+        return torch.nn.functional.mse_loss(soft_ranks, target_ranks)
+
+
 class ListwiseRankingModel(RankingRewardModel):
     """
     Extension that supports listwise ranking losses

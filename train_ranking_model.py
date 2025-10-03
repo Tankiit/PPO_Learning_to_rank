@@ -5,6 +5,7 @@ import os
 from transformers import get_linear_schedule_with_warmup
 from torch.optim import AdamW
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
 
 from ds_critique_loader import DSCritiqueBankLoader
 from ranking_models import RankingRewardModel
@@ -21,6 +22,15 @@ def train_ranking_reward_model(args):
         except ImportError:
             print("wandb not installed, skipping logging")
             args.use_wandb = False
+
+    # Initialize TensorBoard writer
+    if args.use_tensorboard:
+        tb_log_dir = os.path.join(args.output_dir, 'tensorboard_logs')
+        os.makedirs(tb_log_dir, exist_ok=True)
+        writer = SummaryWriter(log_dir=tb_log_dir)
+        print(f"TensorBoard logs will be saved to: {tb_log_dir}")
+    else:
+        writer = None
 
     # Load data
     print("Loading data...")
@@ -88,6 +98,7 @@ def train_ranking_reward_model(args):
 
     print(f"\nStarting training for {args.num_epochs} epochs...")
 
+    global_step = 0
     for epoch in range(args.num_epochs):
         # Training
         model.train()
@@ -121,10 +132,20 @@ def train_ranking_reward_model(args):
 
             train_loss += loss.item()
             num_batches += 1
+            global_step += 1
+
+            # Log to TensorBoard
+            if writer is not None:
+                writer.add_scalar('Loss/train_batch', loss.item(), global_step)
+                writer.add_scalar('Learning_Rate', scheduler.get_last_lr()[0], global_step)
 
             progress_bar.set_postfix({'loss': loss.item()})
 
         avg_train_loss = train_loss / num_batches
+
+        # Log epoch average to TensorBoard
+        if writer is not None:
+            writer.add_scalar('Loss/train_epoch', avg_train_loss, epoch + 1)
 
         # Validation
         print("\nRunning validation...")
@@ -143,6 +164,16 @@ def train_ranking_reward_model(args):
         print(f"Val MAP: {val_results.get('map', 0):.4f}")
         print(f"Val Spearman: {val_results.get('spearman', 0):.4f}")
         print(f"{'='*60}\n")
+
+        # Log to TensorBoard
+        if writer is not None:
+            writer.add_scalar('Metrics/val_ndcg@1', val_results.get('ndcg@1', 0), epoch + 1)
+            writer.add_scalar('Metrics/val_ndcg@3', val_results.get('ndcg@3', 0), epoch + 1)
+            writer.add_scalar('Metrics/val_ndcg@5', val_results.get('ndcg@5', 0), epoch + 1)
+            writer.add_scalar('Metrics/val_map', val_results.get('map', 0), epoch + 1)
+            writer.add_scalar('Metrics/val_mrr', val_results.get('mrr', 0), epoch + 1)
+            writer.add_scalar('Metrics/val_kendall_tau', val_results.get('kendall_tau', 0), epoch + 1)
+            writer.add_scalar('Metrics/val_spearman', val_results.get('spearman', 0), epoch + 1)
 
         if args.use_wandb:
             import wandb
@@ -167,7 +198,7 @@ def train_ranking_reward_model(args):
                 'val_results': val_results
             }, save_path)
 
-            print(f"✅ Saved best model with val score: {val_score:.4f}\n")
+            print(f"Saved best model with val score: {val_score:.4f}\n")
 
     # Save final model
     final_path = os.path.join(args.output_dir, 'final_model.pt')
@@ -179,7 +210,13 @@ def train_ranking_reward_model(args):
             'dropout': args.dropout
         }
     }, final_path)
-    print(f"✅ Saved final model to {final_path}")
+    print(f"Saved final model to {final_path}")
+
+    # Close TensorBoard writer
+    if writer is not None:
+        writer.close()
+        print(f"TensorBoard logs saved to {tb_log_dir}")
+        print(f"   View with: tensorboard --logdir={tb_log_dir}")
 
     return model
 
@@ -225,7 +262,7 @@ if __name__ == "__main__":
                        help='Batch size for training (default: 16)')
     parser.add_argument('--learning_rate', type=float, default=2e-5,
                        help='Learning rate (default: 2e-5)')
-    parser.add_argument('--num_epochs', type=int, default=3,
+    parser.add_argument('--num_epochs', type=int, default=50,
                        help='Number of epochs (default: 3)')
     parser.add_argument('--dropout', type=float, default=0.1,
                        help='Dropout rate (default: 0.1)')
@@ -235,6 +272,8 @@ if __name__ == "__main__":
                        help='Use CUDA if available')
     parser.add_argument('--use_wandb', action='store_true',
                        help='Use Weights & Biases for logging')
+    parser.add_argument('--use_tensorboard', action='store_true',
+                       help='Use TensorBoard for logging')
 
     args = parser.parse_args()
 
@@ -248,8 +287,9 @@ if __name__ == "__main__":
     print(f"Output dir: {args.output_dir}")
     print(f"Use CUDA: {args.use_cuda}")
     print(f"Use wandb: {args.use_wandb}")
+    print(f"Use TensorBoard: {args.use_tensorboard}")
     print("="*60 + "\n")
 
     train_ranking_reward_model(args)
 
-    print("\n✅ Training complete!")
+    print("\nTraining complete!")
