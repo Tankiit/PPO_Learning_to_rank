@@ -10,7 +10,7 @@ class DSCritiqueBankLoader:
     Converts 5-point critique scores to training data for ranking reward models
     """
 
-    def __init__(self, cache_dir: Optional[str] = None, data_dir: Optional[str] = 'data/processed/comprehensive_ranking_dataset'):
+    def __init__(self, cache_dir: Optional[str] = None, data_dir: Optional[str] = 'data/processed/comprehensive_ranking_dataset', use_local: bool = True):
         self.cache_dir = cache_dir
         self.dataset = None
         self.score_mapping = {
@@ -21,18 +21,24 @@ class DSCritiqueBankLoader:
             5: "excellent"
         }
         self.data_dir = data_dir
+        self.use_local = use_local
     def load_dataset(self) -> DatasetDict:
         """Load DS_Critique_Bank from HuggingFace or use local synthetic data"""
         print("Loading Digital Socrates Critique Bank...")
-        try:
-            self.dataset = load_dataset(
-                "allenai/DS_Critique_Bank",
-                cache_dir=self.cache_dir
-            )
-        except Exception as e:
-            print(f"Could not load DS_Critique_Bank from HF: {e}")
-            print("Using local synthetic data instead...")
+
+        if self.use_local:
+            print("Using local synthetic data...")
             self.dataset = self._load_local_synthetic_data()
+        else:
+            try:
+                self.dataset = load_dataset(
+                    "allenai/DS_Critique_Bank",
+                    cache_dir=self.cache_dir
+                )
+            except Exception as e:
+                print(f"Could not load DS_Critique_Bank from HF: {e}")
+                print("Using local synthetic data instead...")
+                self.dataset = self._load_local_synthetic_data()
 
         return self.dataset
 
@@ -131,17 +137,48 @@ class DSCritiqueBankLoader:
                 query_groups[query_id]['critiques'].append(critique)
 
         # Convert to ranking format
+        # Split large query groups into smaller ones (max 15 candidates per group)
+        MAX_CANDIDATES_PER_QUERY = 15
+
         for query_id, group_data in query_groups.items():
-            if len(group_data['explanations']) >= 2:  # Need at least 2 for ranking
+            explanations = group_data['explanations']
+            scores = group_data['scores']
+            critiques = group_data['critiques']
+
+            if len(explanations) < 2:
+                continue
+
+            # If group is large, split into smaller sub-groups
+            if len(explanations) > MAX_CANDIDATES_PER_QUERY:
+                # Split into chunks
+                for i in range(0, len(explanations), MAX_CANDIDATES_PER_QUERY):
+                    chunk_exps = explanations[i:i+MAX_CANDIDATES_PER_QUERY]
+                    chunk_scores = scores[i:i+MAX_CANDIDATES_PER_QUERY]
+
+                    # Only use chunks with score diversity
+                    if len(set(chunk_scores)) > 1:
+                        ranking_example = {
+                            'query': self._format_as_query(group_data['question']),
+                            'explanations': chunk_exps,
+                            'scores': chunk_scores,
+                            'num_candidates': len(chunk_exps)
+                        }
+
+                        if include_critiques:
+                            ranking_example['critiques'] = critiques[i:i+MAX_CANDIDATES_PER_QUERY]
+
+                        ranking_examples.append(ranking_example)
+            else:
+                # Keep small groups as-is
                 ranking_example = {
                     'query': self._format_as_query(group_data['question']),
-                    'explanations': group_data['explanations'],
-                    'scores': group_data['scores'],
-                    'num_candidates': len(group_data['explanations'])
+                    'explanations': explanations,
+                    'scores': scores,
+                    'num_candidates': len(explanations)
                 }
 
                 if include_critiques:
-                    ranking_example['critiques'] = group_data['critiques']
+                    ranking_example['critiques'] = critiques
 
                 ranking_examples.append(ranking_example)
 
@@ -270,4 +307,4 @@ if __name__ == "__main__":
         print(f"  Chosen (score {sample['chosen_score']}): {sample['chosen'][:80]}...")
         print(f"  Rejected (score {sample['rejected_score']}): {sample['rejected'][:80]}...")
 
-    print("\n✅ DS Critique Bank Loader test complete!")
+    print("\nDS Critique Bank Loader test complete!")

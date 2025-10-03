@@ -53,8 +53,12 @@ class RankingEvaluator:
                 print(f"Error ranking: {e}")
                 continue
 
+            # Normalize gold scores to [0, 1] to match model output
+            # Assumes gold scores are on 1-5 scale
+            gold_scores_normalized = [(s - 1) / 4.0 for s in gold_scores]
+
             # Compute metrics
-            metrics = self.compute_metrics(gold_scores, pred_scores)
+            metrics = self.compute_metrics(gold_scores_normalized, pred_scores)
 
             for metric, value in metrics.items():
                 if not np.isnan(value):
@@ -99,21 +103,34 @@ class RankingEvaluator:
             metrics['mrr'] = self._compute_mrr(gold_scores, pred_scores)
 
         # Correlation metrics
-        if len(set(gold_scores)) > 1:  # Need variation
+        if len(set(gold_scores)) > 1 and len(set(pred_scores)) > 1:  # Need variation in both
             if 'kendall_tau' in self.metrics:
-                tau, _ = kendalltau(gold_scores, pred_scores)
-                metrics['kendall_tau'] = tau
+                try:
+                    tau, _ = kendalltau(gold_scores, pred_scores)
+                    metrics['kendall_tau'] = tau if not np.isnan(tau) else 0.0
+                except:
+                    metrics['kendall_tau'] = 0.0
 
             if 'spearman' in self.metrics:
-                rho, _ = spearmanr(gold_scores, pred_scores)
-                metrics['spearman'] = rho
+                try:
+                    rho, _ = spearmanr(gold_scores, pred_scores)
+                    metrics['spearman'] = rho if not np.isnan(rho) else 0.0
+                except:
+                    metrics['spearman'] = 0.0
+        else:
+            # No variance in predictions or gold scores
+            if 'kendall_tau' in self.metrics:
+                metrics['kendall_tau'] = 0.0
+            if 'spearman' in self.metrics:
+                metrics['spearman'] = 0.0
 
         return metrics
 
     def _compute_map(self, gold_scores: np.ndarray, pred_scores: np.ndarray) -> float:
         """Compute Mean Average Precision"""
-        # Define relevance threshold (e.g., score >= 4 is relevant)
-        threshold = 4.0
+        # Define relevance threshold (e.g., score >= 0.75 is relevant for normalized [0,1] scores)
+        # This corresponds to score >= 4 on the original 1-5 scale
+        threshold = 0.75
         relevance = (gold_scores >= threshold).astype(int)
 
         # Sort by predicted scores
