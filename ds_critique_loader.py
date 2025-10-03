@@ -53,6 +53,7 @@ class DSCritiqueBankLoader:
             # Convert to DS format - need to keep only essential columns
             def convert_format(example):
                 return {
+                    'query_id': example['query_id'],
                     'question': example['premise'],
                     'explanation': example['candidate'],
                     'score': example['quality_score'] + 1,  # Convert 0-4 to 1-5
@@ -92,21 +93,26 @@ class DSCritiqueBankLoader:
         data = self.dataset[split]
         ranking_examples = []
 
-        # Group by unique questions
-        question_groups = {}
+        # Group by unique query_id (not question text!)
+        query_groups = {}
 
         for example in tqdm(data, desc=f"Processing {split} split"):
             # Handle both DS format and our format
+            query_id = example.get('query_id', example.get('qid', ''))
             question = example.get('question', example.get('premise', ''))
             explanation = example.get('explanation', example.get('candidate', ''))
             score = example.get('score', example.get('quality_score', 0))
+
+            # If no query_id, fall back to grouping by question text
+            if not query_id:
+                query_id = question
 
             # Convert score if needed (0-4 to 1-5)
             if score <= 4 and score >= 0:
                 score = score + 1  # Convert 0-4 to 1-5
 
-            if question not in question_groups:
-                question_groups[question] = {
+            if query_id not in query_groups:
+                query_groups[query_id] = {
                     'question': question,
                     'explanations': [],
                     'scores': [],
@@ -114,18 +120,18 @@ class DSCritiqueBankLoader:
                 }
 
             # Add explanation and score
-            question_groups[question]['explanations'].append(explanation)
-            question_groups[question]['scores'].append(score)
+            query_groups[query_id]['explanations'].append(explanation)
+            query_groups[query_id]['scores'].append(score)
 
             if include_critiques:
                 critique = example.get('critique', f"Quality: {score}")
-                question_groups[question]['critiques'].append(critique)
+                query_groups[query_id]['critiques'].append(critique)
 
         # Convert to ranking format
-        for question, group_data in question_groups.items():
+        for query_id, group_data in query_groups.items():
             if len(group_data['explanations']) >= 2:  # Need at least 2 for ranking
                 ranking_example = {
-                    'query': self._format_as_query(question),
+                    'query': self._format_as_query(group_data['question']),
                     'explanations': group_data['explanations'],
                     'scores': group_data['scores'],
                     'num_candidates': len(group_data['explanations'])

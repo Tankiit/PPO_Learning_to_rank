@@ -108,6 +108,8 @@ def train_ranking_reward_model(args):
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.num_epochs}")
 
         for batch in progress_bar:
+            optimizer.zero_grad()
+
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
             scores = batch['scores']
@@ -128,7 +130,6 @@ def train_ranking_reward_model(args):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             scheduler.step()
-            optimizer.zero_grad()
 
             train_loss += loss.item()
             num_batches += 1
