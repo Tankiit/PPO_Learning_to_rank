@@ -34,7 +34,7 @@ def train_ranking_reward_model(args):
 
     # Load data
     print("Loading data...")
-    loader = DSCritiqueBankLoader()
+    loader = DSCritiqueBankLoader(data_dir='data/processed/comprehensive_ranking_dataset')
     dataset = loader.load_dataset()
 
     train_data = loader.convert_to_ranking_format('train')

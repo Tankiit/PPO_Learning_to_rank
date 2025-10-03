@@ -10,7 +10,7 @@ class DSCritiqueBankLoader:
     Converts 5-point critique scores to training data for ranking reward models
     """
 
-    def __init__(self, cache_dir: Optional[str] = None):
+    def __init__(self, cache_dir: Optional[str] = None, data_dir: Optional[str] = 'data/processed/comprehensive_ranking_dataset'):
         self.cache_dir = cache_dir
         self.dataset = None
         self.score_mapping = {
@@ -20,7 +20,7 @@ class DSCritiqueBankLoader:
             4: "good",
             5: "excellent"
         }
-
+        self.data_dir = data_dir
     def load_dataset(self) -> DatasetDict:
         """Load DS_Critique_Bank from HuggingFace or use local synthetic data"""
         print("Loading Digital Socrates Critique Bank...")
@@ -42,7 +42,8 @@ class DSCritiqueBankLoader:
 
         try:
             # Load from our created dataset
-            full_dataset = load_from_disk('data/processed/comprehensive_ranking_dataset')
+            # full_dataset = load_from_disk('data/processed/comprehensive_ranking_dataset')
+            full_dataset = load_from_disk(self.data_dir)
 
             # Filter only DS critique examples
             train_ds = full_dataset['train'].filter(lambda x: x['source'] == 'ds-critique')
