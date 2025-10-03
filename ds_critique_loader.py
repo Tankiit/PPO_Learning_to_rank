@@ -101,15 +101,18 @@ class DSCritiqueBankLoader:
             query_id = example.get('query_id', example.get('qid', ''))
             question = example.get('question', example.get('premise', ''))
             explanation = example.get('explanation', example.get('candidate', ''))
-            score = example.get('score', example.get('quality_score', 0))
+
+            # Get score - check if it's already converted or raw quality_score
+            score = example.get('score', None)
+            if score is None:
+                # Raw quality_score from 0-4, convert to 1-5
+                quality_score = example.get('quality_score', 0)
+                score = quality_score + 1
+            # If score exists, it's already 1-5 from convert_format, use as-is
 
             # If no query_id, fall back to grouping by question text
             if not query_id:
                 query_id = question
-
-            # Convert score if needed (0-4 to 1-5)
-            if score <= 4 and score >= 0:
-                score = score + 1  # Convert 0-4 to 1-5
 
             if query_id not in query_groups:
                 query_groups[query_id] = {
