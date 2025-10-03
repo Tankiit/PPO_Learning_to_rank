@@ -34,7 +34,7 @@ def train_ranking_reward_model(args):
 
     # Load data
     print("Loading data...")
-    loader = DSCritiqueBankLoader(data_dir='data/processed/comprehensive_ranking_dataset')
+    loader = DSCritiqueBankLoader()
     dataset = loader.load_dataset()
 
     train_data = loader.convert_to_ranking_format('train')
@@ -116,7 +116,7 @@ def train_ranking_reward_model(args):
                 input_ids = input_ids.cuda()
                 attention_mask = attention_mask.cuda()
                 scores = scores.cuda()
-
+            optimizer.zero_grad()
             # Forward pass
             pred_scores = model(input_ids, attention_mask)
 
@@ -128,7 +128,7 @@ def train_ranking_reward_model(args):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             scheduler.step()
-            optimizer.zero_grad()
+
 
             train_loss += loss.item()
             num_batches += 1
