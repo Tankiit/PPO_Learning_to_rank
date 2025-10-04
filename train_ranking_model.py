@@ -126,6 +126,12 @@ def train_ranking_reward_model(args):
         full_dataset = load_from_disk(data_dir)
 
         train_ds = full_dataset['train'].filter(lambda x: x['source'] == 'ds-critique')
+
+        # Note: ds-critique validation set has only 5 queries with ~666 candidates each
+        # This is not realistic. For better validation, we'll sample from training set
+        print("Warning: ds-critique validation set has only 5 queries with 666+ candidates each.")
+        print("For more realistic validation, consider using --val_subset_size to sample fewer examples per query.")
+
         val_ds = full_dataset['validation'].filter(lambda x: x['source'] == 'ds-critique')
 
         def convert_format(example):
@@ -182,6 +188,18 @@ def train_ranking_reward_model(args):
 
                 if len(explanations) < 2:
                     continue
+
+                # For validation, limit candidates per query to avoid artificial perfect scores
+                # (ds-critique has 666 candidates per query which makes metrics meaningless)
+                max_candidates_per_query = 50
+                if len(explanations) > max_candidates_per_query and split == 'validation':
+                    # Randomly sample to get diverse quality scores
+                    import random
+                    indices = list(range(len(explanations)))
+                    random.shuffle(indices)
+                    indices = indices[:max_candidates_per_query]
+                    explanations = [explanations[i] for i in indices]
+                    scores = [scores[i] for i in indices]
 
                 # Normalize scores to [0, 1] (scores are 1-5)
                 normalized_scores = [(s - 1) / 4.0 for s in scores]
