@@ -8,8 +8,27 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
 from ds_critique_loader import DSCritiqueBankLoader
+from esnli_loader import ESNLILoader
+from chaosnli_loader import ChaosNLILoader
+from stackexchange_loader import StackExchangeLoader
+from dialogue_loader import DialogueLoader
 from ranking_models import RankingRewardModel
 from ranking_evaluator import RankingEvaluator
+
+def get_data_loader(dataset_name):
+    if dataset_name == 'ds_critique':
+        return DSCritiqueBankLoader()
+    elif dataset_name == 'esnli':
+        return ESNLILoader()
+    elif dataset_name == 'chaosnli':
+        return ChaosNLILoader()
+    elif dataset_name == 'stackexchange':
+        return StackExchangeLoader()
+    elif dataset_name == 'dialogue':
+        return DialogueLoader()
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
+
 
 def train_ranking_reward_model(args):
     """Train a ranking-based reward model on DS_Critique_Bank"""
@@ -33,8 +52,8 @@ def train_ranking_reward_model(args):
         writer = None
 
     # Load data
-    print("Loading data...")
-    loader = DSCritiqueBankLoader()
+    print(f"Loading data for dataset: {args.dataset}")
+    loader = get_data_loader(args.dataset)
     dataset = loader.load_dataset()
 
     train_data = loader.convert_to_ranking_format('train')
@@ -61,6 +80,9 @@ def train_ranking_reward_model(args):
     if args.use_cuda and torch.cuda.is_available():
         model = model.cuda()
         print("Using CUDA")
+    elif torch.backends.mps.is_available():
+        model = model.to('mps')
+        print("Using MPS (Metal Performance Shaders)")
     else:
         print("Using CPU")
 
@@ -107,9 +129,7 @@ def train_ranking_reward_model(args):
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.num_epochs}")
 
-        for batch in progress_bar:
-            optimizer.zero_grad()
-
+        for batch_idx, batch in enumerate(progress_bar):
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
             scores = batch['scores']
@@ -118,6 +138,10 @@ def train_ranking_reward_model(args):
                 input_ids = input_ids.cuda()
                 attention_mask = attention_mask.cuda()
                 scores = scores.cuda()
+            elif torch.backends.mps.is_available():
+                input_ids = input_ids.to('mps')
+                attention_mask = attention_mask.to('mps')
+                scores = scores.to('mps')
 
             # Forward pass
             pred_scores = model(input_ids, attention_mask)
@@ -125,22 +149,37 @@ def train_ranking_reward_model(args):
             # MSE loss for regression
             loss = torch.nn.functional.mse_loss(pred_scores, scores)
 
+            # Scale loss for gradient accumulation
+            loss = loss / args.gradient_accumulation_steps
+
             # Backward pass
             loss.backward()
+
+            # Only update weights every gradient_accumulation_steps
+            if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+
+                global_step += 1
+
+                # Log to TensorBoard
+                if writer is not None:
+                    writer.add_scalar('Loss/train_batch', loss.item() * args.gradient_accumulation_steps, global_step)
+                    writer.add_scalar('Learning_Rate', scheduler.get_last_lr()[0], global_step)
+
+            train_loss += loss.item() * args.gradient_accumulation_steps
+            num_batches += 1
+
+            progress_bar.set_postfix({'loss': loss.item() * args.gradient_accumulation_steps})
+
+        # Clear any remaining gradients
+        if num_batches % args.gradient_accumulation_steps != 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             scheduler.step()
-
-            train_loss += loss.item()
-            num_batches += 1
-            global_step += 1
-
-            # Log to TensorBoard
-            if writer is not None:
-                writer.add_scalar('Loss/train_batch', loss.item(), global_step)
-                writer.add_scalar('Learning_Rate', scheduler.get_last_lr()[0], global_step)
-
-            progress_bar.set_postfix({'loss': loss.item()})
+            optimizer.zero_grad()
 
         avg_train_loss = train_loss / num_batches
 
@@ -275,7 +314,10 @@ if __name__ == "__main__":
                        help='Use Weights & Biases for logging')
     parser.add_argument('--use_tensorboard', action='store_true',
                        help='Use TensorBoard for logging')
-
+        parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
+                           help='Number of gradient accumulation steps (default: 1)')
+        parser.add_argument('--dataset', type=str, default='ds_critique',
+                           help='Dataset to use for training (ds_critique, esnli, chaosnli)')
     args = parser.parse_args()
 
     print("="*60)
@@ -289,6 +331,7 @@ if __name__ == "__main__":
     print(f"Use CUDA: {args.use_cuda}")
     print(f"Use wandb: {args.use_wandb}")
     print(f"Use TensorBoard: {args.use_tensorboard}")
+    print(f"Gradient accumulation steps: {args.gradient_accumulation_steps}")
     print("="*60 + "\n")
 
     train_ranking_reward_model(args)

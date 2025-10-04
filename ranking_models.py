@@ -14,12 +14,34 @@ class RankingRewardModel(nn.Module):
                  base_model: str = "bert-base-uncased",
                  output_mode: str = "regression",  # "regression" or "ranking"
                  num_labels: int = 1,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1,
+                 use_quantization: bool = False):
         super().__init__()
 
         self.output_mode = output_mode
+        self.use_quantization = use_quantization
         self.tokenizer = AutoTokenizer.from_pretrained(base_model)
-        self.encoder = AutoModel.from_pretrained(base_model)
+
+        # Load model with optional quantization
+        if use_quantization:
+            # Use 8-bit quantization for faster inference and lower memory
+            try:
+                from transformers import BitsAndBytesConfig
+                quantization_config = BitsAndBytesConfig(
+                    load_in_8bit=True,
+                    llm_int8_threshold=6.0
+                )
+                self.encoder = AutoModel.from_pretrained(
+                    base_model,
+                    quantization_config=quantization_config,
+                    device_map="auto"
+                )
+                print("Using 8-bit quantization")
+            except ImportError:
+                print("bitsandbytes not available, falling back to standard precision")
+                self.encoder = AutoModel.from_pretrained(base_model)
+        else:
+            self.encoder = AutoModel.from_pretrained(base_model)
 
         hidden_size = self.encoder.config.hidden_size
 
@@ -371,7 +393,7 @@ if __name__ == "__main__":
             base_model="bert-base-uncased",
             output_mode="regression"
         )
-        print("✅ Model initialized successfully")
+        print("Model initialized successfully")
 
         # Test forward pass
         dummy_input = actual_model.tokenizer(
@@ -382,14 +404,14 @@ if __name__ == "__main__":
         )
 
         output = actual_model(**dummy_input)
-        print(f"✅ Forward pass successful, output shape: {output.shape}")
+        print(f"Forward pass successful, output shape: {output.shape}")
 
         # Test ranking
         scores = actual_model.rank_explanations(query, explanations)
-        print(f"✅ Ranking successful, scores: {[f'{s:.3f}' for s in scores]}")
+        print(f"Ranking successful, scores: {[f'{s:.3f}' for s in scores]}")
 
     except Exception as e:
-        print(f"⚠️  Could not test actual model: {e}")
+        print(f"Could not test actual model: {e}")
         print("   This is normal if you don't have the model downloaded yet")
 
-    print("\n✅ Ranking model test complete!")
+    print("\nRanking model test complete!")

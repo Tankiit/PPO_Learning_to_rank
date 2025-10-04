@@ -25,19 +25,25 @@ class RankingEvaluator:
                 test_data: List[Dict],
                 batch_size: int = 32) -> Dict[str, float]:
         """
-        Evaluate model on ranking metrics
+        Evaluate model on ranking metrics with batched inference
 
         Args:
             model: Model with rank_explanations method
             test_data: List of examples with 'query', 'explanations', 'scores'
-            batch_size: Batch size for evaluation
+            batch_size: Batch size for evaluation (number of query-explanation pairs)
 
         Returns:
             Dictionary of metric scores
         """
         all_results = defaultdict(list)
 
-        for example in tqdm(test_data, desc="Evaluating"):
+        # Flatten all examples into batches
+        batched_queries = []
+        batched_explanations = []
+        batched_gold_scores = []
+        example_lengths = []
+
+        for example in test_data:
             query = example['query']
             explanations = example['explanations']
             gold_scores = example['scores']
@@ -46,12 +52,52 @@ class RankingEvaluator:
             if len(explanations) < 2:
                 continue
 
-            # Get model predictions
-            try:
-                pred_scores = model.rank_explanations(query, explanations)
-            except Exception as e:
-                print(f"Error ranking: {e}")
-                continue
+            batched_queries.extend([query] * len(explanations))
+            batched_explanations.extend(explanations)
+            batched_gold_scores.extend(gold_scores)
+            example_lengths.append(len(explanations))
+
+        # Get predictions in batches
+        all_pred_scores = []
+        model.eval()
+        device = next(model.parameters()).device
+
+        with torch.no_grad():
+            for i in tqdm(range(0, len(batched_queries), batch_size), desc="Evaluating"):
+                batch_queries = batched_queries[i:i+batch_size]
+                batch_explanations = batched_explanations[i:i+batch_size]
+
+                # Tokenize batch
+                texts = [f"{q} {model.tokenizer.sep_token} {e}"
+                        for q, e in zip(batch_queries, batch_explanations)]
+
+                encoded = model.tokenizer(
+                    texts,
+                    padding=True,
+                    truncation=True,
+                    max_length=256,
+                    return_tensors='pt'
+                )
+
+                # Move to device
+                encoded = {k: v.to(device) for k, v in encoded.items()}
+
+                # Get scores
+                try:
+                    scores = model(
+                        input_ids=encoded['input_ids'],
+                        attention_mask=encoded['attention_mask']
+                    )
+                    all_pred_scores.extend(scores.cpu().numpy().tolist())
+                except Exception as e:
+                    print(f"Error in batch prediction: {e}")
+                    all_pred_scores.extend([0.0] * len(batch_queries))
+
+        # Reconstruct per-example predictions
+        start_idx = 0
+        for length in example_lengths:
+            pred_scores = all_pred_scores[start_idx:start_idx+length]
+            gold_scores = batched_gold_scores[start_idx:start_idx+length]
 
             # Normalize gold scores to [0, 1] to match model output
             # Assumes gold scores are on 1-5 scale
@@ -63,6 +109,8 @@ class RankingEvaluator:
             for metric, value in metrics.items():
                 if not np.isnan(value):
                     all_results[metric].append(value)
+
+            start_idx += length
 
         # Aggregate results
         final_results = {}
