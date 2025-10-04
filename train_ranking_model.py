@@ -6,6 +6,7 @@ from transformers import get_linear_schedule_with_warmup
 from torch.optim import AdamW
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+from functools import partial
 
 from ranking_models import RankingRewardModel
 from ranking_evaluator import RankingEvaluator
@@ -118,7 +119,7 @@ def train_ranking_reward_model(args):
         val_data = convert_to_ranking_format('validation')
 
     elif args.dataset == 'ds_critique':
-        from datasets import load_from_disk
+        from datasets import load_from_disk, DatasetDict
 
         data_dir = 'data/processed/comprehensive_ranking_dataset'
         full_dataset = load_from_disk(data_dir)
@@ -409,21 +410,41 @@ def train_ranking_reward_model(args):
         print("Using CPU")
 
     # Create datasets and dataloaders
-    train_dataset = RankingDataset(train_regression, model.tokenizer)
-    val_dataset = RankingDataset(val_regression, model.tokenizer)
+    train_dataset = RankingDataset(train_regression, model.tokenizer, pre_tokenize=True)
+    val_dataset = RankingDataset(val_regression, model.tokenizer, pre_tokenize=True)
+
+    # Determine device for pin_memory (only useful for CUDA)
+    use_pin_memory = args.use_cuda and torch.cuda.is_available()
+
+    # For MPS, we need to be careful with num_workers
+    # MPS works best with num_workers > 0, but pin_memory should be False
+    actual_num_workers = args.num_workers
+    if torch.backends.mps.is_available() and not torch.cuda.is_available():
+        # MPS is available and CUDA is not
+        if actual_num_workers == 0:
+            print("Warning: num_workers=0 with MPS may be slow. Consider using --num_workers 2 or higher.")
+
+    # Use functools.partial to pass tokenizer to collate_fn
+    collate_fn = partial(collate_fn_dynamic_padding, tokenizer=model.tokenizer)
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=0  # Use 0 for compatibility
+        num_workers=actual_num_workers,
+        pin_memory=use_pin_memory,
+        collate_fn=collate_fn,
+        persistent_workers=actual_num_workers > 0  # Keep workers alive between epochs
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=0
+        num_workers=actual_num_workers,
+        pin_memory=use_pin_memory,
+        collate_fn=collate_fn,
+        persistent_workers=actual_num_workers > 0
     )
 
     # Setup optimizer and scheduler
@@ -452,14 +473,16 @@ def train_ranking_reward_model(args):
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.num_epochs}")
 
         for batch_idx, batch in enumerate(progress_bar):
+            # Get data (already on correct device via pin_memory)
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
             scores = batch['scores']
 
+            # Move to device (pin_memory + non_blocking makes this async for CUDA)
             if args.use_cuda and torch.cuda.is_available():
-                input_ids = input_ids.cuda()
-                attention_mask = attention_mask.cuda()
-                scores = scores.cuda()
+                input_ids = input_ids.cuda(non_blocking=True)
+                attention_mask = attention_mask.cuda(non_blocking=True)
+                scores = scores.cuda(non_blocking=True)
             elif torch.backends.mps.is_available():
                 input_ids = input_ids.to('mps')
                 attention_mask = attention_mask.to('mps')
@@ -509,26 +532,40 @@ def train_ranking_reward_model(args):
         if writer is not None:
             writer.add_scalar('Loss/train_epoch', avg_train_loss, epoch + 1)
 
-        # Validation
-        print("\nRunning validation...")
-        model.eval()
-        evaluator = RankingEvaluator()
-        val_results = evaluator.evaluate(model, val_data)
+        # Validation (with optional frequency control)
+        should_validate = (epoch + 1) % args.val_frequency == 0 or (epoch + 1) == args.num_epochs
+
+        if should_validate:
+            print("\nRunning validation...")
+            model.eval()
+            evaluator = RankingEvaluator()
+
+            # Use subset for faster validation if specified
+            val_data_subset = val_data[:args.val_subset_size] if args.val_subset_size > 0 else val_data
+            if args.val_subset_size > 0:
+                print(f"Validating on subset of {len(val_data_subset)}/{len(val_data)} examples")
+
+            val_results = evaluator.evaluate(model, val_data_subset)
+        else:
+            print(f"\nSkipping validation (runs every {args.val_frequency} epochs)")
+            val_results = {}
 
         # Log results
         print(f"\n{'='*60}")
         print(f"Epoch {epoch+1}/{args.num_epochs}")
         print(f"{'='*60}")
         print(f"Train Loss: {avg_train_loss:.4f}")
-        print(f"Val NDCG@1: {val_results.get('ndcg@1', 0):.4f}")
-        print(f"Val NDCG@3: {val_results.get('ndcg@3', 0):.4f}")
-        print(f"Val NDCG@5: {val_results.get('ndcg@5', 0):.4f}")
-        print(f"Val MAP: {val_results.get('map', 0):.4f}")
-        print(f"Val Spearman: {val_results.get('spearman', 0):.4f}")
+
+        if val_results:
+            print(f"Val NDCG@1: {val_results.get('ndcg@1', 0):.4f}")
+            print(f"Val NDCG@3: {val_results.get('ndcg@3', 0):.4f}")
+            print(f"Val NDCG@5: {val_results.get('ndcg@5', 0):.4f}")
+            print(f"Val MAP: {val_results.get('map', 0):.4f}")
+            print(f"Val Spearman: {val_results.get('spearman', 0):.4f}")
         print(f"{'='*60}\n")
 
         # Log to TensorBoard
-        if writer is not None:
+        if writer is not None and val_results:
             writer.add_scalar('Metrics/val_ndcg@1', val_results.get('ndcg@1', 0), epoch + 1)
             writer.add_scalar('Metrics/val_ndcg@3', val_results.get('ndcg@3', 0), epoch + 1)
             writer.add_scalar('Metrics/val_ndcg@5', val_results.get('ndcg@5', 0), epoch + 1)
@@ -537,7 +574,7 @@ def train_ranking_reward_model(args):
             writer.add_scalar('Metrics/val_kendall_tau', val_results.get('kendall_tau', 0), epoch + 1)
             writer.add_scalar('Metrics/val_spearman', val_results.get('spearman', 0), epoch + 1)
 
-        if args.use_wandb:
+        if args.use_wandb and val_results:
             import wandb
             log_dict = {
                 'epoch': epoch + 1,
@@ -546,21 +583,22 @@ def train_ranking_reward_model(args):
             log_dict.update({f'val_{k}': v for k, v in val_results.items() if not k.endswith('_std')})
             wandb.log(log_dict)
 
-        # Save best model
-        val_score = val_results.get('ndcg@5', val_results.get('spearman', 0))
-        if val_score > best_val_score:
-            best_val_score = val_score
+        # Save best model (only when validation was run)
+        if val_results:
+            val_score = val_results.get('ndcg@5', val_results.get('spearman', 0))
+            if val_score > best_val_score:
+                best_val_score = val_score
 
-            save_path = os.path.join(args.output_dir, 'best_model.pt')
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_score': val_score,
-                'val_results': val_results
-            }, save_path)
+                save_path = os.path.join(args.output_dir, 'best_model.pt')
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'val_score': val_score,
+                    'val_results': val_results
+                }, save_path)
 
-            print(f"Saved best model with val score: {val_score:.4f}\n")
+                print(f"Saved best model with val score: {val_score:.4f}\n")
 
     # Save final model
     final_path = os.path.join(args.output_dir, 'final_model.pt')
@@ -586,34 +624,87 @@ def train_ranking_reward_model(args):
 class RankingDataset(torch.utils.data.Dataset):
     """Dataset for ranking reward model training"""
 
-    def __init__(self, data, tokenizer, max_length=256):
+    def __init__(self, data, tokenizer, max_length=256, pre_tokenize=True):
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
+
+        # Pre-tokenize all data for significant speedup
+        if pre_tokenize:
+            print("Pre-tokenizing dataset...")
+            self.tokenized_data = []
+            for item in tqdm(data, desc="Tokenizing"):
+                text = f"{item['query']} {tokenizer.sep_token} {item['explanation']}"
+                encoded = tokenizer(
+                    text,
+                    truncation=True,
+                    max_length=max_length,
+                    padding=False,  # Will use dynamic padding in collate_fn
+                    return_tensors=None
+                )
+                self.tokenized_data.append({
+                    'input_ids': encoded['input_ids'],
+                    'attention_mask': encoded['attention_mask'],
+                    'score': item['normalized_score']
+                })
+        else:
+            self.tokenized_data = None
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        item = self.data[idx]
+        if self.tokenized_data is not None:
+            # Return pre-tokenized data
+            item = self.tokenized_data[idx]
+            return {
+                'input_ids': item['input_ids'],
+                'attention_mask': item['attention_mask'],
+                'scores': item['score']
+            }
+        else:
+            # Fallback to on-the-fly tokenization
+            item = self.data[idx]
+            text = f"{item['query']} {self.tokenizer.sep_token} {item['explanation']}"
+            encoded = self.tokenizer(
+                text,
+                truncation=True,
+                max_length=self.max_length,
+                padding='max_length',
+                return_tensors='pt'
+            )
+            return {
+                'input_ids': encoded['input_ids'].squeeze(),
+                'attention_mask': encoded['attention_mask'].squeeze(),
+                'scores': torch.tensor(item['normalized_score'], dtype=torch.float)
+            }
 
-        # Combine query and explanation
-        text = f"{item['query']} {self.tokenizer.sep_token} {item['explanation']}"
 
-        # Tokenize
-        encoded = self.tokenizer(
-            text,
-            truncation=True,
-            max_length=self.max_length,
-            padding='max_length',
-            return_tensors='pt'
-        )
+def collate_fn_dynamic_padding(batch, tokenizer):
+    """Custom collate function with dynamic padding"""
+    # Find max length in this batch
+    max_len = max(len(item['input_ids']) for item in batch)
 
-        return {
-            'input_ids': encoded['input_ids'].squeeze(),
-            'attention_mask': encoded['attention_mask'].squeeze(),
-            'scores': torch.tensor(item['normalized_score'], dtype=torch.float)
-        }
+    input_ids = []
+    attention_masks = []
+    scores = []
+
+    for item in batch:
+        # Pad to max length in batch
+        pad_len = max_len - len(item['input_ids'])
+
+        padded_input_ids = item['input_ids'] + [tokenizer.pad_token_id] * pad_len
+        padded_attention_mask = item['attention_mask'] + [0] * pad_len
+
+        input_ids.append(padded_input_ids)
+        attention_masks.append(padded_attention_mask)
+        scores.append(item['scores'])
+
+    return {
+        'input_ids': torch.tensor(input_ids, dtype=torch.long),
+        'attention_mask': torch.tensor(attention_masks, dtype=torch.long),
+        'scores': torch.tensor(scores, dtype=torch.float)
+    }
 
 
 if __name__ == "__main__":
@@ -640,6 +731,12 @@ if __name__ == "__main__":
                            help='Number of gradient accumulation steps (default: 1)')
     parser.add_argument('--dataset', type=str, default='ds_critique',
                            help='Dataset to use for training (ds_critique, esnli, chaosnli)')
+    parser.add_argument('--num_workers', type=int, default=4,
+                           help='Number of DataLoader workers (default: 4, use 0 for debugging)')
+    parser.add_argument('--val_frequency', type=int, default=1,
+                           help='Validate every N epochs (default: 1)')
+    parser.add_argument('--val_subset_size', type=int, default=0,
+                           help='Use subset of validation data (0=use all, >0=use subset)')
     args = parser.parse_args()
 
     print("="*60)
