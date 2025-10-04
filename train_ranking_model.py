@@ -7,27 +7,8 @@ from torch.optim import AdamW
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
-from ds_critique_loader import DSCritiqueBankLoader
-from esnli_loader import ESNLILoader
-from chaosnli_loader import ChaosNLILoader
-from stackexchange_loader import StackExchangeLoader
-from dialogue_loader import DialogueLoader
 from ranking_models import RankingRewardModel
 from ranking_evaluator import RankingEvaluator
-
-def get_data_loader(dataset_name):
-    if dataset_name == 'ds_critique':
-        return DSCritiqueBankLoader()
-    elif dataset_name == 'esnli':
-        return ESNLILoader()
-    elif dataset_name == 'chaosnli':
-        return ChaosNLILoader()
-    elif dataset_name == 'stackexchange':
-        return StackExchangeLoader()
-    elif dataset_name == 'dialogue':
-        return DialogueLoader()
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
 def train_ranking_reward_model(args):
@@ -53,11 +34,347 @@ def train_ranking_reward_model(args):
 
     # Load data
     print(f"Loading data for dataset: {args.dataset}")
-    loader = get_data_loader(args.dataset)
-    dataset = loader.load_dataset()
 
-    train_data = loader.convert_to_ranking_format('train')
-    val_data = loader.convert_to_ranking_format('validation' if 'validation' in dataset else 'test')
+    if args.dataset == 'chaosnli':
+        import json
+        import random
+        from datasets import Dataset, DatasetDict
+
+        data_path = 'data/raw/chaosnli/chaosNLI_v1.0/chaosNLI_snli.jsonl'
+        with open(data_path, 'r') as f:
+            lines = f.readlines()
+        
+        data = [json.loads(line) for line in lines]
+        
+        random.shuffle(data)
+        
+        train_size = int(0.8 * len(data))
+        val_size = int(0.1 * len(data))
+        
+        train_data = data[:train_size]
+        val_data = data[train_size:train_size + val_size]
+        test_data = data[train_size + val_size:]
+        
+        dataset = DatasetDict({
+            'train': Dataset.from_list(train_data),
+            'validation': Dataset.from_list(val_data),
+            'test': Dataset.from_list(test_data)
+        })
+
+        def _calculate_score(label_counter):
+            entailment_count = label_counter.get('e', 0)
+            neutral_count = label_counter.get('n', 0)
+            contradiction_count = label_counter.get('c', 0)
+            
+            total_annotations = entailment_count + neutral_count + contradiction_count
+            
+            if total_annotations == 0:
+                return 0.0
+            
+            score = (entailment_count * 2 + neutral_count * 1 + contradiction_count * 0) / total_annotations
+            return score
+
+        def _format_as_query(premise):
+            return f"Premise: {premise}"
+
+        def convert_to_ranking_format(split):
+            ranking_examples = []
+            for example in dataset[split]:
+                premise = example['example']['premise']
+                hypothesis = example['example']['hypothesis']
+                label_counter = example['label_counter']
+                
+                score = _calculate_score(label_counter)
+                
+                ranking_examples.append({
+                    'query': _format_as_query(premise),
+                    'explanations': [hypothesis],
+                    'scores': [score],
+                    'num_candidates': 1
+                })
+            return ranking_examples
+
+        def create_regression_data(ranking_examples):
+            regression_examples = []
+            for example in ranking_examples:
+                query = example['query']
+                explanation = example['explanations'][0]
+                score = example['scores'][0]
+                
+                regression_examples.append({
+                    'query': query,
+                    'explanation': explanation,
+                    'score': score,
+                    'normalized_score': score / 2.0  # Normalize to [0, 1]
+                })
+            return regression_examples
+
+        train_data = convert_to_ranking_format('train')
+        val_data = convert_to_ranking_format('validation')
+
+    elif args.dataset == 'ds_critique':
+        from datasets import load_from_disk
+
+        data_dir = 'data/processed/comprehensive_ranking_dataset'
+        full_dataset = load_from_disk(data_dir)
+
+        train_ds = full_dataset['train'].filter(lambda x: x['source'] == 'ds-critique')
+        val_ds = full_dataset['validation'].filter(lambda x: x['source'] == 'ds-critique')
+
+        def convert_format(example):
+            return {
+                'query_id': example['query_id'],
+                'question': example['premise'],
+                'explanation': example['candidate'],
+                'score': example['quality_score'] + 1,  # Convert 0-4 to 1-5
+                'critique': f"Quality level: {example['quality_score']}"
+            }
+
+        train_converted = train_ds.map(convert_format, remove_columns=train_ds.column_names)
+        val_converted = val_ds.map(convert_format, remove_columns=val_ds.column_names)
+
+        dataset = DatasetDict({
+            'train': train_converted,
+            'validation': val_converted
+        })
+
+        def _format_as_query(question):
+            if "If:" in question and "why" in question.lower():
+                return question
+            elif "?" in question:
+                return f"Question: {question}\nExplain why the answer is correct."
+            else:
+                return f"Explain: {question}"
+
+        def convert_to_ranking_format(split):
+            ranking_examples = []
+            query_groups = {}
+
+            for example in dataset[split]:
+                query_id = example.get('query_id', example.get('qid', ''))
+                question = example.get('question', example.get('premise', ''))
+                explanation = example.get('explanation', example.get('candidate', ''))
+                score = example.get('score', 0)
+
+                if not query_id:
+                    query_id = question
+
+                if query_id not in query_groups:
+                    query_groups[query_id] = {
+                        'question': question,
+                        'explanations': [],
+                        'scores': []
+                    }
+
+                query_groups[query_id]['explanations'].append(explanation)
+                query_groups[query_id]['scores'].append(score)
+
+            for query_id, group_data in query_groups.items():
+                explanations = group_data['explanations']
+                scores = group_data['scores']
+
+                if len(explanations) < 2:
+                    continue
+
+                ranking_example = {
+                    'query': _format_as_query(group_data['question']),
+                    'explanations': explanations,
+                    'scores': scores,
+                    'num_candidates': len(explanations)
+                }
+                ranking_examples.append(ranking_example)
+
+            return ranking_examples
+
+        def create_regression_data(ranking_examples):
+            regression_examples = []
+            for example in ranking_examples:
+                query = example['query']
+                for exp, score in zip(example['explanations'], example['scores']):
+                    regression_examples.append({
+                        'query': query,
+                        'explanation': exp,
+                        'score': score,
+                        'normalized_score': (score - 1) / 4.0  # Normalize to [0, 1]
+                    })
+            return regression_examples
+
+        train_data = convert_to_ranking_format('train')
+        val_data = convert_to_ranking_format('validation')
+
+    elif args.dataset == 'esnli':
+        from datasets import load_from_disk
+
+        data_dir = 'data/raw/e-snli/normalized'
+        dataset = load_from_disk(data_dir)
+
+        score_mapping = {
+            "entailment": 3,
+            "neutral": 2,
+            "contradiction": 1
+        }
+
+        def _format_as_query(premise):
+            return f"Premise: {premise}"
+
+        def convert_to_ranking_format(split):
+            ranking_examples = []
+            query_groups = {}
+
+            for example in dataset[split]:
+                query_id = example.get('query_id')
+                premise = example.get('premise')
+                explanation = example.get('gold_explanation')
+                label = example.get('label')
+
+                if not query_id:
+                    query_id = premise
+
+                if query_id not in query_groups:
+                    query_groups[query_id] = {
+                        'question': premise,
+                        'explanations': [],
+                        'scores': []
+                    }
+                
+                score = score_mapping.get(label, 0)
+
+                query_groups[query_id]['explanations'].append(explanation)
+                query_groups[query_id]['scores'].append(score)
+
+            for query_id, group_data in query_groups.items():
+                explanations = group_data['explanations']
+                scores = group_data['scores']
+
+                if len(explanations) < 2:
+                    continue
+
+                ranking_example = {
+                    'query': _format_as_query(group_data['question']),
+                    'explanations': explanations,
+                    'scores': scores,
+                    'num_candidates': len(explanations)
+                }
+                ranking_examples.append(ranking_example)
+
+            return ranking_examples
+
+        def create_regression_data(ranking_examples):
+            regression_examples = []
+            for example in ranking_examples:
+                query = example['query']
+                for exp, score in zip(example['explanations'], example['scores']):
+                    regression_examples.append({
+                        'query': query,
+                        'explanation': exp,
+                        'score': score,
+                        'normalized_score': (score - 1) / 2.0  # Normalize to [0, 1]
+                    })
+            return regression_examples
+
+        train_data = convert_to_ranking_format('train')
+        val_data = convert_to_ranking_format('validation')
+
+    elif args.dataset == 'stackexchange':
+        from datasets import load_dataset
+
+        dataset = load_dataset("lvwerra/stack-exchange-paired")
+
+        def convert_to_ranking_format(split):
+            ranking_examples = []
+            for example in dataset[split]:
+                query = example['question']
+                chosen_answer = example['response_j']
+                rejected_answer = example['response_k']
+
+                ranking_examples.append({
+                    'query': query,
+                    'explanations': [chosen_answer, rejected_answer],
+                    'scores': [1, 0],
+                    'num_candidates': 2
+                })
+            return ranking_examples
+
+        def create_regression_data(ranking_examples):
+            regression_examples = []
+            for example in ranking_examples:
+                query = example['query']
+                chosen_answer = example['explanations'][0]
+                rejected_answer = example['explanations'][1]
+
+                regression_examples.append({
+                    'query': query,
+                    'explanation': chosen_answer,
+                    'score': 1,
+                    'normalized_score': 1.0
+                })
+                regression_examples.append({
+                    'query': query,
+                    'explanation': rejected_answer,
+                    'score': 0,
+                    'normalized_score': 0.0
+                })
+            return regression_examples
+
+        train_data = convert_to_ranking_format('train')
+        val_data = convert_to_ranking_format('test') # Using test set for validation as there is no validation set
+
+    elif args.dataset == 'dialogue':
+        from datasets import load_dataset
+
+        dataset = load_dataset("daily_dialog")
+
+        def _calculate_score(dialogue, topic, emotion, act):
+            score = 0
+            score += len(dialogue)
+            if topic != 0:
+                score += 2
+            score += len(set(emotion))
+            score += len(set(act))
+            return float(score)
+
+        def convert_to_ranking_format(split):
+            ranking_examples = []
+            for example in dataset[split]:
+                dialogue = example['dialog']
+                topic = example['topic']
+                emotion = example['emotion']
+                act = example['act']
+
+                score = _calculate_score(dialogue, topic, emotion, act)
+
+                for i in range(1, len(dialogue)):
+                    query = "\n".join(dialogue[:i])
+                    explanation = dialogue[i]
+
+                    ranking_examples.append({
+                        'query': query,
+                        'explanations': [explanation],
+                        'scores': [score],
+                        'num_candidates': 1
+                    })
+            return ranking_examples
+
+        def create_regression_data(ranking_examples):
+            regression_examples = []
+            for example in ranking_examples:
+                query = example['query']
+                explanation = example['explanations'][0]
+                score = example['scores'][0]
+
+                regression_examples.append({
+                    'query': query,
+                    'explanation': explanation,
+                    'score': score,
+                    'normalized_score': score / 10.0  # Normalize to [0, 1]
+                })
+            return regression_examples
+
+        train_data = convert_to_ranking_format('train')
+        val_data = convert_to_ranking_format('validation')
+
+    else:
+        raise ValueError(f"Dataset {args.dataset} not supported in this simplified script.")
 
     print(f"Train examples: {len(train_data)}")
     print(f"Val examples: {len(val_data)}")
@@ -314,9 +631,9 @@ if __name__ == "__main__":
                        help='Use Weights & Biases for logging')
     parser.add_argument('--use_tensorboard', action='store_true',
                        help='Use TensorBoard for logging')
-        parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
                            help='Number of gradient accumulation steps (default: 1)')
-        parser.add_argument('--dataset', type=str, default='ds_critique',
+    parser.add_argument('--dataset', type=str, default='ds_critique',
                            help='Dataset to use for training (ds_critique, esnli, chaosnli)')
     args = parser.parse_args()
 

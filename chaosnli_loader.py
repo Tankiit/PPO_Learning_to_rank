@@ -14,8 +14,16 @@ class ChaosNLILoader:
     """
 
     def __init__(self, data_path: str = 'data/raw/chaosnli/chaosNLI_v1.0/chaosNLI_snli.jsonl'):
-        # Dynamically determine the project root
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        # Dynamically determine the project root by finding the directory that contains the 'data' directory
+        current_dir = os.getcwd()
+        project_root = current_dir
+        while not os.path.exists(os.path.join(project_root, 'data')):
+            parent_dir = os.path.dirname(project_root)
+            if parent_dir == project_root:
+                # Reached the root of the filesystem without finding the 'data' directory
+                raise FileNotFoundError("Could not find the 'data' directory in any parent directory.")
+            project_root = parent_dir
+
         self.data_path = os.path.join(project_root, data_path)
         self.dataset = None
 
