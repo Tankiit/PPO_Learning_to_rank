@@ -89,13 +89,14 @@ def train_ranking_reward_model(args):
                 premise = example['example']['premise']
                 hypothesis = example['example']['hypothesis']
                 label_counter = example['label_counter']
-                
+
                 score = _calculate_score(label_counter)
-                
+                normalized_score = score / 2.0  # Normalize to [0, 1]
+
                 ranking_examples.append({
                     'query': _format_as_query(premise),
                     'explanations': [hypothesis],
-                    'scores': [score],
+                    'scores': [normalized_score],  # Store normalized scores
                     'num_candidates': 1
                 })
             return ranking_examples
@@ -105,13 +106,13 @@ def train_ranking_reward_model(args):
             for example in ranking_examples:
                 query = example['query']
                 explanation = example['explanations'][0]
-                score = example['scores'][0]
-                
+                normalized_score = example['scores'][0]  # Already normalized
+
                 regression_examples.append({
                     'query': query,
                     'explanation': explanation,
-                    'score': score,
-                    'normalized_score': score / 2.0  # Normalize to [0, 1]
+                    'score': normalized_score,
+                    'normalized_score': normalized_score  # Already normalized
                 })
             return regression_examples
 
@@ -182,10 +183,13 @@ def train_ranking_reward_model(args):
                 if len(explanations) < 2:
                     continue
 
+                # Normalize scores to [0, 1] (scores are 1-5)
+                normalized_scores = [(s - 1) / 4.0 for s in scores]
+
                 ranking_example = {
                     'query': _format_as_query(group_data['question']),
                     'explanations': explanations,
-                    'scores': scores,
+                    'scores': normalized_scores,  # Store normalized scores
                     'num_candidates': len(explanations)
                 }
                 ranking_examples.append(ranking_example)
@@ -196,12 +200,12 @@ def train_ranking_reward_model(args):
             regression_examples = []
             for example in ranking_examples:
                 query = example['query']
-                for exp, score in zip(example['explanations'], example['scores']):
+                for exp, normalized_score in zip(example['explanations'], example['scores']):
                     regression_examples.append({
                         'query': query,
                         'explanation': exp,
-                        'score': score,
-                        'normalized_score': (score - 1) / 4.0  # Normalize to [0, 1]
+                        'score': normalized_score,
+                        'normalized_score': normalized_score  # Already normalized
                     })
             return regression_examples
 
@@ -255,10 +259,13 @@ def train_ranking_reward_model(args):
                 if len(explanations) < 2:
                     continue
 
+                # Normalize scores to [0, 1] (scores are 1-3)
+                normalized_scores = [(s - 1) / 2.0 for s in scores]
+
                 ranking_example = {
                     'query': _format_as_query(group_data['question']),
                     'explanations': explanations,
-                    'scores': scores,
+                    'scores': normalized_scores,  # Store normalized scores
                     'num_candidates': len(explanations)
                 }
                 ranking_examples.append(ranking_example)
@@ -269,12 +276,12 @@ def train_ranking_reward_model(args):
             regression_examples = []
             for example in ranking_examples:
                 query = example['query']
-                for exp, score in zip(example['explanations'], example['scores']):
+                for exp, normalized_score in zip(example['explanations'], example['scores']):
                     regression_examples.append({
                         'query': query,
                         'explanation': exp,
-                        'score': score,
-                        'normalized_score': (score - 1) / 2.0  # Normalize to [0, 1]
+                        'score': normalized_score,
+                        'normalized_score': normalized_score  # Already normalized
                     })
             return regression_examples
 
@@ -348,6 +355,7 @@ def train_ranking_reward_model(args):
                 act = example['act']
 
                 score = _calculate_score(dialogue, topic, emotion, act)
+                normalized_score = score / 10.0  # Normalize to [0, 1]
 
                 for i in range(1, len(dialogue)):
                     query = "\n".join(dialogue[:i])
@@ -356,7 +364,7 @@ def train_ranking_reward_model(args):
                     ranking_examples.append({
                         'query': query,
                         'explanations': [explanation],
-                        'scores': [score],
+                        'scores': [normalized_score],  # Store normalized score
                         'num_candidates': 1
                     })
             return ranking_examples
@@ -366,13 +374,13 @@ def train_ranking_reward_model(args):
             for example in ranking_examples:
                 query = example['query']
                 explanation = example['explanations'][0]
-                score = example['scores'][0]
+                normalized_score = example['scores'][0]  # Already normalized
 
                 regression_examples.append({
                     'query': query,
                     'explanation': explanation,
-                    'score': score,
-                    'normalized_score': score / 10.0  # Normalize to [0, 1]
+                    'score': normalized_score,
+                    'normalized_score': normalized_score  # Already normalized
                 })
             return regression_examples
 
