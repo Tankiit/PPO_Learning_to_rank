@@ -13,7 +13,9 @@ class ChaosNLILoader:
     Converts multiple annotations into a single score for training reward models.
     """
 
-    def __init__(self, project_root: str = '/Users/tanmoy/research/PPO_learning_to_rank/PPO_Learning_to_rank', data_path: str = 'data/raw/chaosnli/chaosNLI_v1.0/chaosNLI_snli.jsonl'):
+    def __init__(self, data_path: str = 'data/raw/chaosnli/chaosNLI_v1.0/chaosNLI_snli.jsonl'):
+        # Dynamically determine the project root
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
         self.data_path = os.path.join(project_root, data_path)
         self.dataset = None
 

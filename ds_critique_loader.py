@@ -12,7 +12,9 @@ class DSCritiqueBankLoader:
     Converts 5-point critique scores to training data for ranking reward models
     """
 
-    def __init__(self, project_root: str = '/Users/tanmoy/research/PPO_learning_to_rank/PPO_Learning_to_rank', cache_dir: Optional[str] = None, data_dir: Optional[str] = 'data/processed/comprehensive_ranking_dataset', use_local: bool = True):
+    def __init__(self, cache_dir: Optional[str] = None, data_dir: Optional[str] = 'data/processed/comprehensive_ranking_dataset', use_local: bool = True):
+        # Dynamically determine the project root
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
         self.cache_dir = cache_dir
         self.dataset = None
         self.score_mapping = {
