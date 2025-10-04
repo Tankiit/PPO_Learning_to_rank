@@ -23,7 +23,8 @@ class RankingEvaluator:
     def evaluate(self,
                 model,
                 test_data: List[Dict],
-                batch_size: int = 32) -> Dict[str, float]:
+                batch_size: int = 32,
+                relevance_threshold: float = 0.75) -> Dict[str, float]:
         """
         Evaluate model on ranking metrics with batched inference
 
@@ -99,9 +100,8 @@ class RankingEvaluator:
             pred_scores = all_pred_scores[start_idx:start_idx+length]
             gold_scores = batched_gold_scores[start_idx:start_idx+length]
 
-            # Normalize gold scores to [0, 1] to match model output
-            # Assumes gold scores are on 1-5 scale
-            gold_scores_normalized = [(s - 1) / 4.0 for s in gold_scores]
+            # The gold scores are already normalized in the data loading part
+            gold_scores_normalized = gold_scores
 
             # Compute metrics
             metrics = self.compute_metrics(gold_scores_normalized, pred_scores)
@@ -124,7 +124,8 @@ class RankingEvaluator:
 
     def compute_metrics(self,
                        gold_scores: List[float],
-                       pred_scores: List[float]) -> Dict[str, float]:
+                       pred_scores: List[float],
+                       relevance_threshold: float = 0.75) -> Dict[str, float]:
         """Compute all ranking metrics for a single query"""
 
         metrics = {}
@@ -144,7 +145,7 @@ class RankingEvaluator:
 
         # Mean Average Precision
         if 'map' in self.metrics:
-            metrics['map'] = self._compute_map(gold_scores, pred_scores)
+            metrics['map'] = self._compute_map(gold_scores, pred_scores, relevance_threshold)
 
         # Mean Reciprocal Rank
         if 'mrr' in self.metrics:
@@ -174,12 +175,10 @@ class RankingEvaluator:
 
         return metrics
 
-    def _compute_map(self, gold_scores: np.ndarray, pred_scores: np.ndarray) -> float:
+    def _compute_map(self, gold_scores: np.ndarray, pred_scores: np.ndarray, relevance_threshold: float = 0.75) -> float:
         """Compute Mean Average Precision"""
         # Define relevance threshold (e.g., score >= 0.75 is relevant for normalized [0,1] scores)
-        # This corresponds to score >= 4 on the original 1-5 scale
-        threshold = 0.75
-        relevance = (gold_scores >= threshold).astype(int)
+        relevance = (gold_scores >= relevance_threshold).astype(int)
 
         # Sort by predicted scores
         sorted_indices = np.argsort(-pred_scores)

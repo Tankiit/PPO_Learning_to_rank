@@ -110,7 +110,8 @@ def train_ranking_reward_model(args):
                     'query': query,
                     'explanation': explanation,
                     'score': score,
-                    'normalized_score': score / 2.0  # Normalize to [0, 1]
+                    'normalized_score': score / 2.0,  # Normalize to [0, 1]
+                    'normalized_scores': [s / 2.0 for s in example['scores']]
                 })
             return regression_examples
 
@@ -200,7 +201,8 @@ def train_ranking_reward_model(args):
                         'query': query,
                         'explanation': exp,
                         'score': score,
-                        'normalized_score': (score - 1) / 4.0  # Normalize to [0, 1]
+                        'normalized_score': (score - 1) / 4.0,  # Normalize to [0, 1]
+                        'normalized_scores': [(s - 1) / 4.0 for s in example['scores']]
                     })
             return regression_examples
 
@@ -273,7 +275,8 @@ def train_ranking_reward_model(args):
                         'query': query,
                         'explanation': exp,
                         'score': score,
-                        'normalized_score': (score - 1) / 2.0  # Normalize to [0, 1]
+                        'normalized_score': (score - 1) / 2.0,  # Normalize to [0, 1]
+                        'normalized_scores': [(s - 1) / 2.0 for s in example['scores']]
                     })
             return regression_examples
 
@@ -311,13 +314,15 @@ def train_ranking_reward_model(args):
                     'query': query,
                     'explanation': chosen_answer,
                     'score': 1,
-                    'normalized_score': 1.0
+                    'normalized_score': 1.0,
+                    'normalized_scores': [1.0, 0.0]
                 })
                 regression_examples.append({
                     'query': query,
                     'explanation': rejected_answer,
                     'score': 0,
-                    'normalized_score': 0.0
+                    'normalized_score': 0.0,
+                    'normalized_scores': [1.0, 0.0]
                 })
             return regression_examples
 
@@ -371,7 +376,8 @@ def train_ranking_reward_model(args):
                     'query': query,
                     'explanation': explanation,
                     'score': score,
-                    'normalized_score': score / 10.0  # Normalize to [0, 1]
+                    'normalized_score': score / 10.0,  # Normalize to [0, 1]
+                    'normalized_scores': [s / 10.0 for s in example['scores']]
                 })
             return regression_examples
 
@@ -513,7 +519,30 @@ def train_ranking_reward_model(args):
         print("\nRunning validation...")
         model.eval()
         evaluator = RankingEvaluator()
-        val_results = evaluator.evaluate(model, val_data)
+
+        # Create a new val_data list with normalized scores
+        val_data_normalized = []
+        for item in val_data:
+            if args.dataset == 'ds_critique':
+                normalized_scores = [(s - 1) / 4.0 for s in item['scores']]
+            elif args.dataset == 'esnli':
+                normalized_scores = [(s - 1) / 2.0 for s in item['scores']]
+            elif args.dataset == 'chaosnli':
+                normalized_scores = [s / 2.0 for s in item['scores']]
+            elif args.dataset == 'stackexchange':
+                normalized_scores = [1.0, 0.0]
+            elif args.dataset == 'dialogue':
+                normalized_scores = [s / 10.0 for s in item['scores']]
+            else:
+                normalized_scores = item['scores']
+
+            val_data_normalized.append({
+                'query': item['query'],
+                'explanations': item['explanations'],
+                'scores': normalized_scores
+            })
+
+        val_results = evaluator.evaluate(model, val_data_normalized, relevance_threshold=args.relevance_threshold)
 
         # Log results
         print(f"\n{'='*60}")
@@ -640,6 +669,8 @@ if __name__ == "__main__":
                            help='Number of gradient accumulation steps (default: 1)')
     parser.add_argument('--dataset', type=str, default='ds_critique',
                            help='Dataset to use for training (ds_critique, esnli, chaosnli)')
+    parser.add_argument('--relevance_threshold', type=float, default=0.75,
+                       help='Relevance threshold for MAP calculation')
     args = parser.parse_args()
 
     print("="*60)
