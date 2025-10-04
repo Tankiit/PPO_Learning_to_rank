@@ -62,15 +62,20 @@ def train_ranking_reward_model(args):
         })
 
         def _calculate_score(label_counter):
-            entailment_count = label_counter.get('e', 0)
-            neutral_count = label_counter.get('n', 0)
-            contradiction_count = label_counter.get('c', 0)
-            
+            entailment_count = label_counter.get('e')
+            neutral_count = label_counter.get('n')
+            contradiction_count = label_counter.get('c')
+
+            if entailment_count is None:
+                entailment_count = 0
+            if neutral_count is None:
+                neutral_count = 0
+            if contradiction_count is None:
+                contradiction_count = 0
+
             total_annotations = entailment_count + neutral_count + contradiction_count
-            
             if total_annotations == 0:
                 return 0.0
-            
             score = (entailment_count * 2 + neutral_count * 1 + contradiction_count * 0) / total_annotations
             return score
 
@@ -380,8 +385,8 @@ def train_ranking_reward_model(args):
     print(f"Val examples: {len(val_data)}")
 
     # Convert to regression format for training
-    train_regression = loader.create_regression_data(train_data)
-    val_regression = loader.create_regression_data(val_data)
+    train_regression = create_regression_data(train_data)
+    val_regression = create_regression_data(val_data)
 
     print(f"Train regression examples: {len(train_regression)}")
     print(f"Val regression examples: {len(val_regression)}")
