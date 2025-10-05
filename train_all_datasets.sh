@@ -16,12 +16,12 @@ python train_all_datasets.py \
     --datasets all \
     --loss_function $LOSS_FUNCTION \
     --base_model bert-base-uncased \
-    --num_epochs 5 \
+    --num_epochs 100 \
     --batch_size 16 \
     --learning_rate 2e-5 \
-    --early_stopping_patience 3 \
+    --early_stopping_patience 10 \
     --output_dir models/multi_dataset_ranking \
-    --save_every 1 \
+    --save_every 5 \
     --eval_every 1
 
 echo ""

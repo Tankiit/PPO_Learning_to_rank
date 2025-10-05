@@ -239,13 +239,13 @@ def main():
                        help='Batch size')
     parser.add_argument('--learning_rate', type=float, default=2e-5,
                        help='Learning rate')
-    parser.add_argument('--num_epochs', type=int, default=5,
+    parser.add_argument('--num_epochs', type=int, default=100,
                        help='Number of epochs per dataset')
-    parser.add_argument('--early_stopping_patience', type=int, default=3,
+    parser.add_argument('--early_stopping_patience', type=int, default=10,
                        help='Early stopping patience')
 
     # Evaluation
-    parser.add_argument('--save_every', type=int, default=1,
+    parser.add_argument('--save_every', type=int, default=5,
                        help='Save checkpoint every N epochs')
     parser.add_argument('--eval_every', type=int, default=1,
                        help='Evaluate every N epochs')
