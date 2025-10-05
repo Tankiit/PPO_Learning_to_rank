@@ -562,16 +562,21 @@ def train_ranking_reward_model(args):
         should_validate = (epoch + 1) % args.val_frequency == 0 or (epoch + 1) == args.num_epochs
 
         if should_validate:
-            print("\nRunning validation...")
-            model.eval()
-            evaluator = RankingEvaluator()
+            # Skip validation for ds_critique (only 5 queries, metrics are meaningless)
+            if args.dataset == 'ds_critique':
+                print("\nSkipping validation (ds_critique has only 5 queries - use demo_ranking_quality.py instead)")
+                val_results = {}
+            else:
+                print("\nRunning validation...")
+                model.eval()
+                evaluator = RankingEvaluator()
 
-            # Use subset for faster validation if specified
-            val_data_subset = val_data[:args.val_subset_size] if args.val_subset_size > 0 else val_data
-            if args.val_subset_size > 0:
-                print(f"Validating on subset of {len(val_data_subset)}/{len(val_data)} examples")
+                # Use subset for faster validation if specified
+                val_data_subset = val_data[:args.val_subset_size] if args.val_subset_size > 0 else val_data
+                if args.val_subset_size > 0:
+                    print(f"Validating on subset of {len(val_data_subset)}/{len(val_data)} examples")
 
-            val_results = evaluator.evaluate(model, val_data_subset)
+                val_results = evaluator.evaluate(model, val_data_subset)
         else:
             print(f"\nSkipping validation (runs every {args.val_frequency} epochs)")
             val_results = {}
