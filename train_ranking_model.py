@@ -51,15 +51,34 @@ def train_ranking_reward_model(args):
         # Define generic create_regression_data for pre-loaded data
         def create_regression_data(ranking_examples):
             """Convert ranking format to regression format"""
+            # First pass: collect all scores to find global min/max
+            all_scores = []
+            for example in ranking_examples:
+                all_scores.extend(example['scores'])
+
+            if len(all_scores) == 0:
+                return []
+
+            min_score = min(all_scores)
+            max_score = max(all_scores)
+            score_range = max_score - min_score
+
+            # Second pass: normalize using global min/max
             regression_examples = []
             for example in ranking_examples:
                 query = example['query']
                 for exp, score in zip(example['explanations'], example['scores']):
+                    # Normalize to [0, 1] using global min/max
+                    if score_range > 0:
+                        normalized_score = (score - min_score) / score_range
+                    else:
+                        normalized_score = 0.5  # All scores are the same
+
                     regression_examples.append({
                         'query': query,
                         'explanation': exp,
                         'score': score,
-                        'normalized_score': score / max(example['scores']) if max(example['scores']) > 0 else 0.0
+                        'normalized_score': normalized_score
                     })
             return regression_examples
     elif args.dataset == 'chaosnli':
