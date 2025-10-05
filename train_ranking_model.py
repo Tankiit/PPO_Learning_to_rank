@@ -5,7 +5,6 @@ import os
 from transformers import get_linear_schedule_with_warmup
 from torch.optim import AdamW
 from tqdm import tqdm
-from torch.utils.tensorboard import SummaryWriter
 from functools import partial
 
 from ranking_models import RankingRewardModel
@@ -26,10 +25,16 @@ def train_ranking_reward_model(args):
 
     # Initialize TensorBoard writer
     if args.use_tensorboard:
-        tb_log_dir = os.path.join(args.output_dir, 'tensorboard_logs')
-        os.makedirs(tb_log_dir, exist_ok=True)
-        writer = SummaryWriter(log_dir=tb_log_dir)
-        print(f"TensorBoard logs will be saved to: {tb_log_dir}")
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+            tb_log_dir = os.path.join(args.output_dir, 'tensorboard_logs')
+            os.makedirs(tb_log_dir, exist_ok=True)
+            writer = SummaryWriter(log_dir=tb_log_dir)
+            print(f"TensorBoard logs will be saved to: {tb_log_dir}")
+        except ImportError:
+            print("tensorboard not installed, skipping TensorBoard logging")
+            writer = None
+            args.use_tensorboard = False
     else:
         writer = None
 
@@ -123,6 +128,9 @@ def train_ranking_reward_model(args):
         from datasets import load_from_disk, DatasetDict
 
         data_dir = 'data/processed/comprehensive_ranking_dataset'
+        # Try workspace-relative path first, then parent directory
+        if not os.path.exists(data_dir):
+            data_dir = '/Users/tanmoy/research/PPO_learning_to_rank/PPO_Learning_to_rank/data/processed/comprehensive_ranking_dataset'
         full_dataset = load_from_disk(data_dir)
 
         train_ds = full_dataset['train'].filter(lambda x: x['source'] == 'ds-critique')
@@ -526,6 +534,9 @@ def train_ranking_reward_model(args):
 
     print(f"\nStarting training for {args.num_epochs} epochs...")
 
+    # Track all epoch metrics
+    epoch_metrics_history = []
+
     global_step = 0
     for epoch in range(args.num_epochs):
         # Training
@@ -554,8 +565,41 @@ def train_ranking_reward_model(args):
             # Forward pass
             pred_scores = model(input_ids, attention_mask)
 
-            # MSE loss for regression
-            loss = torch.nn.functional.mse_loss(pred_scores, scores)
+            # Choose loss function based on args
+            if args.loss_function == 'mse':
+                # MSE loss for regression
+                loss = torch.nn.functional.mse_loss(pred_scores, scores)
+            elif args.loss_function == 'listnet':
+                # ListNet loss - better for ranking
+                from ranking_models import RankingLosses
+                loss = RankingLosses.listnet_loss(pred_scores.unsqueeze(0), scores.unsqueeze(0))
+            elif args.loss_function == 'ranknet':
+                # RankNet pairwise loss
+                from ranking_models import RankingLosses
+                # Create pairwise comparisons
+                batch_size = pred_scores.size(0)
+                if batch_size > 1:
+                    i_indices = torch.arange(batch_size).repeat_interleave(batch_size)
+                    j_indices = torch.arange(batch_size).repeat(batch_size)
+                    mask = i_indices != j_indices
+                    i_indices = i_indices[mask]
+                    j_indices = j_indices[mask]
+                    loss = RankingLosses.ranknet_loss(
+                        pred_scores[i_indices], pred_scores[j_indices],
+                        scores[i_indices], scores[j_indices]
+                    )
+                else:
+                    loss = torch.nn.functional.mse_loss(pred_scores, scores)
+            elif args.loss_function == 'listmle':
+                # ListMLE loss
+                from ranking_models import RankingLosses
+                loss = RankingLosses.listmle_loss(pred_scores.unsqueeze(0), scores.unsqueeze(0))
+            elif args.loss_function == 'approxndcg':
+                # ApproxNDCG loss - directly optimizes NDCG
+                from ranking_models import RankingLosses
+                loss = RankingLosses.approxndcg_loss(pred_scores.unsqueeze(0), scores.unsqueeze(0))
+            else:
+                raise ValueError(f"Unknown loss function: {args.loss_function}")
 
             # Scale loss for gradient accumulation
             loss = loss / args.gradient_accumulation_steps
@@ -624,12 +668,20 @@ def train_ranking_reward_model(args):
         print(f"{'='*60}")
         print(f"Train Loss: {avg_train_loss:.4f}")
 
+        # Store epoch metrics
+        epoch_metrics = {
+            'epoch': epoch + 1,
+            'train_loss': avg_train_loss,
+        }
         if val_results:
             print(f"Val NDCG@1: {val_results.get('ndcg@1', 0):.4f}")
             print(f"Val NDCG@3: {val_results.get('ndcg@3', 0):.4f}")
             print(f"Val NDCG@5: {val_results.get('ndcg@5', 0):.4f}")
             print(f"Val MAP: {val_results.get('map', 0):.4f}")
             print(f"Val Spearman: {val_results.get('spearman', 0):.4f}")
+            epoch_metrics.update(val_results)
+
+        epoch_metrics_history.append(epoch_metrics)
         print(f"{'='*60}\n")
 
         # Log to TensorBoard
@@ -679,6 +731,13 @@ def train_ranking_reward_model(args):
         }
     }, final_path)
     print(f"Saved final model to {final_path}")
+
+    # Save training metrics history
+    import json
+    metrics_path = os.path.join(args.output_dir, 'training_metrics.json')
+    with open(metrics_path, 'w') as f:
+        json.dump(epoch_metrics_history, f, indent=2)
+    print(f"Training metrics saved to {metrics_path}")
 
     # Close TensorBoard writer
     if writer is not None:
@@ -807,6 +866,11 @@ if __name__ == "__main__":
                            help='Use subset of validation data (0=use all, >0=use subset)')
     parser.add_argument('--use_quantization', action='store_true',
                            help='Use 4-bit/8-bit quantization for large models (requires bitsandbytes)')
+    parser.add_argument('--loss_function', type=str, default='mse',
+                           choices=['mse', 'listnet', 'ranknet', 'listmle', 'approxndcg'],
+                           help='Loss function to use (default: mse). Options: mse (fast, may compress scores), '
+                                'listnet (better ranking), ranknet (pairwise), listmle (listwise), '
+                                'approxndcg (directly optimizes NDCG)')
     args = parser.parse_args()
 
     print("="*60)
@@ -816,6 +880,7 @@ if __name__ == "__main__":
     print(f"Batch size: {args.batch_size}")
     print(f"Learning rate: {args.learning_rate}")
     print(f"Num epochs: {args.num_epochs}")
+    print(f"Loss function: {args.loss_function}")
     print(f"Output dir: {args.output_dir}")
     print(f"Use CUDA: {args.use_cuda}")
     print(f"Use wandb: {args.use_wandb}")
