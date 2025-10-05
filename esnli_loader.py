@@ -85,7 +85,9 @@ class ESNLILoader:
             explanations = group_data['explanations']
             scores = group_data['scores']
 
-            if len(explanations) < 2:
+            # For e-SNLI, each example typically has 1 explanation
+            # We keep them all for regression training
+            if len(explanations) < 1:
                 continue
 
             ranking_example = {
@@ -96,7 +98,7 @@ class ESNLILoader:
             }
             if include_critiques:
                 ranking_example['critiques'] = group_data['critiques']
-            
+
             ranking_examples.append(ranking_example)
 
         return ranking_examples

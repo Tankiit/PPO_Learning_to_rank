@@ -41,7 +41,28 @@ def train_ranking_reward_model(args):
     # Load data
     print(f"Loading data for dataset: {args.dataset}")
 
-    if args.dataset == 'chaosnli':
+    # Check if data is already provided via args (from multi-dataset trainer)
+    if hasattr(args, 'train_data') and args.train_data is not None:
+        print("Using pre-loaded data from args")
+        train_data = args.train_data
+        val_data = args.val_data
+        test_data = args.test_data
+
+        # Define generic create_regression_data for pre-loaded data
+        def create_regression_data(ranking_examples):
+            """Convert ranking format to regression format"""
+            regression_examples = []
+            for example in ranking_examples:
+                query = example['query']
+                for exp, score in zip(example['explanations'], example['scores']):
+                    regression_examples.append({
+                        'query': query,
+                        'explanation': exp,
+                        'score': score,
+                        'normalized_score': score / max(example['scores']) if max(example['scores']) > 0 else 0.0
+                    })
+            return regression_examples
+    elif args.dataset == 'chaosnli':
         import json
         import random
         from datasets import Dataset, DatasetDict
