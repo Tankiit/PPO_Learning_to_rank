@@ -142,7 +142,8 @@ class MultiDatasetTrainer:
             use_pretokenization=True,
             num_workers=4,
             use_quantization=False,
-            gradient_accumulation_steps=1
+            gradient_accumulation_steps=1,
+            val_frequency=1
         )
 
         print(f"\n{'='*80}")
