@@ -240,9 +240,9 @@ def main():
                        help='Batch size')
     parser.add_argument('--learning_rate', type=float, default=2e-5,
                        help='Learning rate')
-    parser.add_argument('--num_epochs', type=int, default=100,
+    parser.add_argument('--num_epochs', type=int, default=50,
                        help='Number of epochs per dataset')
-    parser.add_argument('--early_stopping_patience', type=int, default=10,
+    parser.add_argument('--early_stopping_patience', type=int, default=5,
                        help='Early stopping patience')
 
     # Evaluation

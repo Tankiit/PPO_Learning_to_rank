@@ -16,10 +16,10 @@ python train_all_datasets.py \
     --datasets all \
     --loss_function $LOSS_FUNCTION \
     --base_model bert-base-uncased \
-    --num_epochs 100 \
+    --num_epochs 50 \
     --batch_size 16 \
     --learning_rate 2e-5 \
-    --early_stopping_patience 10 \
+    --early_stopping_patience 5 \
     --output_dir models/multi_dataset_ranking \
     --save_every 5 \
     --eval_every 1
