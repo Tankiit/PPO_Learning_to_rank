@@ -140,7 +140,8 @@ class MultiDatasetTrainer:
             use_wandb=False,
             use_tensorboard=False,
             use_pretokenization=True,
-            num_workers=4
+            num_workers=4,
+            use_quantization=False
         )
 
         print(f"\n{'='*80}")
