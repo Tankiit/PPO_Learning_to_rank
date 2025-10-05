@@ -309,11 +309,40 @@ def train_ranking_reward_model(args):
     elif args.dataset == 'stackexchange':
         from datasets import load_dataset
 
-        dataset = load_dataset("lvwerra/stack-exchange-paired")
+        try:
+            # Try to load the dataset
+            dataset = load_dataset("lvwerra/stack-exchange-paired")
 
-        def convert_to_ranking_format(split):
+            # Check available splits
+            available_splits = list(dataset.keys())
+            print(f"Available splits: {available_splits}")
+
+            # Use train split and create our own validation split
+            if 'train' in available_splits:
+                train_split = dataset['train']
+                # Split train into train/val (90/10)
+                train_size = int(0.9 * len(train_split))
+                train_data_raw = train_split.select(range(train_size))
+                val_data_raw = train_split.select(range(train_size, len(train_split)))
+            else:
+                # If train doesn't exist, use first available split
+                split_name = available_splits[0]
+                print(f"Warning: 'train' split not found, using '{split_name}' instead")
+                full_data = dataset[split_name]
+                train_size = int(0.9 * len(full_data))
+                train_data_raw = full_data.select(range(train_size))
+                val_data_raw = full_data.select(range(train_size, len(full_data)))
+
+        except Exception as e:
+            print(f"Error loading stackexchange dataset: {e}")
+            print("Falling back to ds_critique dataset")
+            args.dataset = 'ds_critique'
+            # Recursively call with ds_critique (hacky but works)
+            raise ValueError("StackExchange dataset unavailable, please use --dataset ds_critique")
+
+        def convert_to_ranking_format(data_split):
             ranking_examples = []
-            for example in dataset[split]:
+            for example in data_split:
                 query = example['question']
                 chosen_answer = example['response_j']
                 rejected_answer = example['response_k']
@@ -321,7 +350,7 @@ def train_ranking_reward_model(args):
                 ranking_examples.append({
                     'query': query,
                     'explanations': [chosen_answer, rejected_answer],
-                    'scores': [1, 0],
+                    'scores': [1.0, 0.0],  # Already normalized
                     'num_candidates': 2
                 })
             return ranking_examples
@@ -336,19 +365,19 @@ def train_ranking_reward_model(args):
                 regression_examples.append({
                     'query': query,
                     'explanation': chosen_answer,
-                    'score': 1,
+                    'score': 1.0,
                     'normalized_score': 1.0
                 })
                 regression_examples.append({
                     'query': query,
                     'explanation': rejected_answer,
-                    'score': 0,
+                    'score': 0.0,
                     'normalized_score': 0.0
                 })
             return regression_examples
 
-        train_data = convert_to_ranking_format('train')
-        val_data = convert_to_ranking_format('test') # Using test set for validation as there is no validation set
+        train_data = convert_to_ranking_format(train_data_raw)
+        val_data = convert_to_ranking_format(val_data_raw)
 
     elif args.dataset == 'dialogue':
         from datasets import load_dataset
