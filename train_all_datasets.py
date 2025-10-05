@@ -32,9 +32,10 @@ class MultiDatasetTrainer:
     DATASETS = {
         'chaosnli': ChaosNLILoader,
         'ds_critique': DSCritiqueBankLoader,
-        'esnli': ESNLILoader,
-        'stackexchange': StackExchangeLoader,
-        'dialogue': DialogueLoader
+        'esnli': ESNLILoader
+        # Note: stackexchange and dialogue require large downloads, disabled for now
+        # 'stackexchange': StackExchangeLoader,
+        # 'dialogue': DialogueLoader
     }
 
     def __init__(self, args):
@@ -122,6 +123,7 @@ class MultiDatasetTrainer:
 
         # Prepare args for training
         train_args = argparse.Namespace(
+            dataset=dataset_name,
             base_model=self.args.base_model,
             max_length=self.args.max_length,
             batch_size=self.args.batch_size,
@@ -215,7 +217,7 @@ def main():
 
     # Dataset selection
     parser.add_argument('--datasets', nargs='+', default=['all'],
-                       choices=['all', 'chaosnli', 'ds_critique', 'esnli', 'stackexchange', 'dialogue'],
+                       choices=['all', 'chaosnli', 'ds_critique', 'esnli'],
                        help='Datasets to train on (default: all)')
 
     # Model config
