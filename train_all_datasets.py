@@ -74,7 +74,16 @@ class MultiDatasetTrainer:
         # Convert to ranking format
         try:
             train_ranking = loader.convert_to_ranking_format('train')
-            val_ranking = loader.convert_to_ranking_format('validation')
+
+            # Handle validation split (may not exist)
+            try:
+                val_ranking = loader.convert_to_ranking_format('validation')
+            except:
+                # Create validation from train split
+                split_idx = int(len(train_ranking) * 0.9)
+                val_ranking = train_ranking[split_idx:]
+                train_ranking = train_ranking[:split_idx]
+                print(f"ℹ️  Created validation split from train (90/10 split)")
 
             # Handle test split (may not exist)
             try:
@@ -95,6 +104,8 @@ class MultiDatasetTrainer:
             }
         except Exception as e:
             print(f"⚠️  Failed to convert {dataset_name} to ranking format: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def train_on_dataset(self, dataset_name: str):
