@@ -14,7 +14,7 @@ class ESNLILoader:
 
     def __init__(self, cache_dir: Optional[str] = None, data_dir: Optional[str] = 'data/raw/e-snli/normalized', use_local: bool = True):
         # Dynamically determine the project root
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
         self.cache_dir = cache_dir
         self.dataset = None
         self.score_mapping = {
@@ -44,7 +44,7 @@ class ESNLILoader:
 
         return self.dataset
 
-    def convert_to_ranking_format(
+    def convert_to_ranking_format(self,
                                  split: str = 'train',
                                  include_critiques: bool = False) -> List[Dict]:
         """
