@@ -420,20 +420,28 @@ def train_ranking_reward_model(args):
 
     # Initialize model
     print(f"Initializing model: {args.base_model}")
+    if args.use_quantization:
+        print("Note: Quantization enabled - model will be loaded with device_map='auto'")
+
     model = RankingRewardModel(
         base_model=args.base_model,
         output_mode="regression",
-        dropout=args.dropout
+        dropout=args.dropout,
+        use_quantization=args.use_quantization
     )
 
-    if args.use_cuda and torch.cuda.is_available():
-        model = model.cuda()
-        print("Using CUDA")
-    elif torch.backends.mps.is_available():
-        model = model.to('mps')
-        print("Using MPS (Metal Performance Shaders)")
+    # Only move model if not using quantization (quantization handles device placement)
+    if not args.use_quantization:
+        if args.use_cuda and torch.cuda.is_available():
+            model = model.cuda()
+            print("Using CUDA")
+        elif torch.backends.mps.is_available():
+            model = model.to('mps')
+            print("Using MPS (Metal Performance Shaders)")
+        else:
+            print("Using CPU")
     else:
-        print("Using CPU")
+        print("Device placement handled by quantization (device_map='auto')")
 
     # Create datasets and dataloaders
     train_dataset = RankingDataset(train_regression, model.tokenizer, pre_tokenize=True)
@@ -768,6 +776,8 @@ if __name__ == "__main__":
                            help='Validate every N epochs (default: 1)')
     parser.add_argument('--val_subset_size', type=int, default=0,
                            help='Use subset of validation data (0=use all, >0=use subset)')
+    parser.add_argument('--use_quantization', action='store_true',
+                           help='Use 4-bit/8-bit quantization for large models (requires bitsandbytes)')
     args = parser.parse_args()
 
     print("="*60)
