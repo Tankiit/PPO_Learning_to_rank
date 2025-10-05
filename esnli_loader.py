@@ -14,7 +14,7 @@ class ESNLILoader:
 
     def __init__(self, cache_dir: Optional[str] = None, data_dir: Optional[str] = 'data/raw/e-snli/normalized', use_local: bool = True):
         # Dynamically determine the project root
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
         self.cache_dir = cache_dir
         self.dataset = None
         self.score_mapping = {
@@ -44,7 +44,7 @@ class ESNLILoader:
 
         return self.dataset
 
-    def convert_to_ranking_format(
+    def convert_to_ranking_format(self,
                                  split: str = 'train',
                                  include_critiques: bool = False) -> List[Dict]:
         """
@@ -85,7 +85,9 @@ class ESNLILoader:
             explanations = group_data['explanations']
             scores = group_data['scores']
 
-            if len(explanations) < 2:
+            # For e-SNLI, each example typically has 1 explanation
+            # We keep them all for regression training
+            if len(explanations) < 1:
                 continue
 
             ranking_example = {
@@ -96,7 +98,7 @@ class ESNLILoader:
             }
             if include_critiques:
                 ranking_example['critiques'] = group_data['critiques']
-            
+
             ranking_examples.append(ranking_example)
 
         return ranking_examples
