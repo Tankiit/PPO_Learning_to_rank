@@ -141,7 +141,8 @@ class MultiDatasetTrainer:
             use_tensorboard=False,
             use_pretokenization=True,
             num_workers=4,
-            use_quantization=False
+            use_quantization=False,
+            gradient_accumulation_steps=1
         )
 
         print(f"\n{'='*80}")
