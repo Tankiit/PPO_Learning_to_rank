@@ -16,11 +16,11 @@ python train_all_datasets.py \
     --datasets all \
     --loss_function $LOSS_FUNCTION \
     --base_model bert-base-uncased \
-    --num_epochs 100 \
+    --num_epochs 50 \
     --batch_size 16 \
     --learning_rate 2e-5 \
-    --early_stopping_patience 10 \
-    --output_dir models/multi_dataset_ranking \
+    --early_stopping_patience 5 \
+    --output_dir ../../models/multi_dataset_ranking \
     --save_every 5 \
     --eval_every 1
 
@@ -28,7 +28,7 @@ echo ""
 echo "=========================================="
 echo "Training Complete!"
 echo "=========================================="
-echo "Results saved to: models/multi_dataset_ranking/"
+echo "Results saved to: ../../models/multi_dataset_ranking/"
 echo ""
 echo "To train on specific datasets:"
 echo "  python train_all_datasets.py --datasets chaosnli esnli"
