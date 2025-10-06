@@ -258,7 +258,7 @@ def main():
                        help='Use mixed precision training')
 
     # Output
-    parser.add_argument('--output_dir', type=str, default='models/multi_dataset_ranking',
+    parser.add_argument('--output_dir', type=str, default='../../models/multi_dataset_ranking',
                        help='Base output directory (subdirs created per dataset)')
 
     args = parser.parse_args()
