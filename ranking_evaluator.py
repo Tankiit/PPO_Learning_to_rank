@@ -100,11 +100,12 @@ class RankingEvaluator:
             pred_scores = all_pred_scores[start_idx:start_idx+length]
             gold_scores = batched_gold_scores[start_idx:start_idx+length]
 
-            # The gold scores are already normalized in the data loading part
+            # Gold scores are already normalized to [0, 1] by the dataset loader
+            # DO NOT re-normalize them here
             gold_scores_normalized = gold_scores
 
             # Compute metrics
-            metrics = self.compute_metrics(gold_scores_normalized, pred_scores)
+            metrics = self.compute_metrics(gold_scores, pred_scores)
 
             for metric, value in metrics.items():
                 if not np.isnan(value):

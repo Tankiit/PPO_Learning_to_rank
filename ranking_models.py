@@ -15,33 +15,69 @@ class RankingRewardModel(nn.Module):
                  output_mode: str = "regression",  # "regression" or "ranking"
                  num_labels: int = 1,
                  dropout: float = 0.1,
-                 use_quantization: bool = False):
+                 use_quantization: bool = False,
+                 trust_remote_code: bool = False):
         super().__init__()
 
         self.output_mode = output_mode
         self.use_quantization = use_quantization
-        self.tokenizer = AutoTokenizer.from_pretrained(base_model)
+        self.base_model = base_model
+
+        # Load tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            base_model,
+            trust_remote_code=trust_remote_code
+        )
+
+        # Add pad token if missing (common for decoder-only models like Llama)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+        # Detect model type
+        self.model_type = self._detect_model_type(base_model)
+        print(f"Model type detected: {self.model_type}")
 
         # Load model with optional quantization
         if use_quantization:
-            # Use 8-bit quantization for faster inference and lower memory
+            # Use 8-bit or 4-bit quantization for large models
             try:
                 from transformers import BitsAndBytesConfig
-                quantization_config = BitsAndBytesConfig(
-                    load_in_8bit=True,
-                    llm_int8_threshold=6.0
-                )
+                # Use 4-bit for very large models (>7B params)
+                use_4bit = any(x in base_model.lower() for x in ['llama', 'mistral', 'mixtral', '7b', '13b', '70b'])
+
+                if use_4bit:
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch.float16,
+                        bnb_4bit_use_double_quant=True,
+                        bnb_4bit_quant_type="nf4"
+                    )
+                    print("Using 4-bit quantization (NF4)")
+                else:
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_8bit=True,
+                        llm_int8_threshold=6.0
+                    )
+                    print("Using 8-bit quantization")
+
                 self.encoder = AutoModel.from_pretrained(
                     base_model,
                     quantization_config=quantization_config,
-                    device_map="auto"
+                    device_map="auto",
+                    trust_remote_code=trust_remote_code
                 )
-                print("Using 8-bit quantization")
             except ImportError:
                 print("bitsandbytes not available, falling back to standard precision")
-                self.encoder = AutoModel.from_pretrained(base_model)
+                self.encoder = AutoModel.from_pretrained(
+                    base_model,
+                    trust_remote_code=trust_remote_code
+                )
         else:
-            self.encoder = AutoModel.from_pretrained(base_model)
+            self.encoder = AutoModel.from_pretrained(
+                base_model,
+                trust_remote_code=trust_remote_code
+            )
 
         hidden_size = self.encoder.config.hidden_size
 
@@ -61,19 +97,60 @@ class RankingRewardModel(nn.Module):
             # For ranking, raw logits are fine
             self.output_activation = nn.Identity()
 
+    def _detect_model_type(self, base_model: str) -> str:
+        """Detect if model is encoder-only (BERT) or decoder-only (Llama/GPT)"""
+        base_model_lower = base_model.lower()
+
+        # Decoder-only models (causal LM)
+        decoder_only = ['gpt', 'llama', 'mistral', 'mixtral', 'phi', 'falcon', 'mpt', 'opt']
+        if any(model in base_model_lower for model in decoder_only):
+            return 'decoder'
+
+        # Encoder-only models
+        encoder_only = ['bert', 'roberta', 'albert', 'electra', 'deberta']
+        if any(model in base_model_lower for model in encoder_only):
+            return 'encoder'
+
+        # Encoder-decoder models
+        encoder_decoder = ['t5', 'bart', 'pegasus']
+        if any(model in base_model_lower for model in encoder_decoder):
+            return 'encoder-decoder'
+
+        # Default to encoder (safest assumption)
+        return 'encoder'
+
     def forward(self,
                 input_ids: torch.Tensor,
                 attention_mask: torch.Tensor,
                 token_type_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        outputs = self.encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids if token_type_ids is not None else None
-        )
+        # For decoder-only models, don't pass token_type_ids
+        if self.model_type == 'decoder':
+            outputs = self.encoder(
+                input_ids=input_ids,
+                attention_mask=attention_mask
+            )
+        else:
+            outputs = self.encoder(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids if token_type_ids is not None else None
+            )
 
-        # Use [CLS] token representation
-        pooled_output = outputs.pooler_output
+        # Get pooled representation
+        if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
+            # BERT-style models have pooler_output ([CLS] token)
+            pooled_output = outputs.pooler_output
+        else:
+            # Decoder-only models: use last token's hidden state (or mean pooling)
+            # Mean pooling across sequence length
+            hidden_states = outputs.last_hidden_state  # [batch, seq_len, hidden]
+            # Mask padding tokens
+            mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
+            sum_hidden = torch.sum(hidden_states * mask_expanded, dim=1)
+            sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
+            pooled_output = sum_hidden / sum_mask
+
         pooled_output = self.dropout(pooled_output)
 
         logits = self.classifier(pooled_output)

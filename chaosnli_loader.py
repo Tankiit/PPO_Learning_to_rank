@@ -102,10 +102,10 @@ class ChaosNLILoader:
 
     def _calculate_score(self, label_counter: Dict) -> float:
         """Calculate a score from the label counter."""
-        entailment_count = label_counter.get('e', 0)
-        neutral_count = label_counter.get('n', 0)
-        contradiction_count = label_counter.get('c', 0)
-        
+        entailment_count = label_counter.get('e', 0) or 0
+        neutral_count = label_counter.get('n', 0) or 0
+        contradiction_count = label_counter.get('c', 0) or 0
+
         total_annotations = entailment_count + neutral_count + contradiction_count
         
         if total_annotations == 0:

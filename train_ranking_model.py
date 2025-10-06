@@ -5,7 +5,7 @@ import os
 from transformers import get_linear_schedule_with_warmup
 from torch.optim import AdamW
 from tqdm import tqdm
-from torch.utils.tensorboard import SummaryWriter
+from functools import partial
 
 from ranking_models import RankingRewardModel
 from ranking_evaluator import RankingEvaluator
@@ -25,17 +25,63 @@ def train_ranking_reward_model(args):
 
     # Initialize TensorBoard writer
     if args.use_tensorboard:
-        tb_log_dir = os.path.join(args.output_dir, 'tensorboard_logs')
-        os.makedirs(tb_log_dir, exist_ok=True)
-        writer = SummaryWriter(log_dir=tb_log_dir)
-        print(f"TensorBoard logs will be saved to: {tb_log_dir}")
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+            tb_log_dir = os.path.join(args.output_dir, 'tensorboard_logs')
+            os.makedirs(tb_log_dir, exist_ok=True)
+            writer = SummaryWriter(log_dir=tb_log_dir)
+            print(f"TensorBoard logs will be saved to: {tb_log_dir}")
+        except ImportError:
+            print("tensorboard not installed, skipping TensorBoard logging")
+            writer = None
+            args.use_tensorboard = False
     else:
         writer = None
 
     # Load data
     print(f"Loading data for dataset: {args.dataset}")
 
-    if args.dataset == 'chaosnli':
+    # Check if data is already provided via args (from multi-dataset trainer)
+    if hasattr(args, 'train_data') and args.train_data is not None:
+        print("Using pre-loaded data from args")
+        train_data = args.train_data
+        val_data = args.val_data
+        test_data = args.test_data
+
+        # Define generic create_regression_data for pre-loaded data
+        def create_regression_data(ranking_examples):
+            """Convert ranking format to regression format"""
+            # First pass: collect all scores to find global min/max
+            all_scores = []
+            for example in ranking_examples:
+                all_scores.extend(example['scores'])
+
+            if len(all_scores) == 0:
+                return []
+
+            min_score = min(all_scores)
+            max_score = max(all_scores)
+            score_range = max_score - min_score
+
+            # Second pass: normalize using global min/max
+            regression_examples = []
+            for example in ranking_examples:
+                query = example['query']
+                for exp, score in zip(example['explanations'], example['scores']):
+                    # Normalize to [0, 1] using global min/max
+                    if score_range > 0:
+                        normalized_score = (score - min_score) / score_range
+                    else:
+                        normalized_score = 0.5  # All scores are the same
+
+                    regression_examples.append({
+                        'query': query,
+                        'explanation': exp,
+                        'score': score,
+                        'normalized_score': normalized_score
+                    })
+            return regression_examples
+    elif args.dataset == 'chaosnli':
         import json
         import random
         from datasets import Dataset, DatasetDict
@@ -88,13 +134,14 @@ def train_ranking_reward_model(args):
                 premise = example['example']['premise']
                 hypothesis = example['example']['hypothesis']
                 label_counter = example['label_counter']
-                
+
                 score = _calculate_score(label_counter)
-                
+                normalized_score = score / 2.0  # Normalize to [0, 1]
+
                 ranking_examples.append({
                     'query': _format_as_query(premise),
                     'explanations': [hypothesis],
-                    'scores': [score],
+                    'scores': [normalized_score],  # Store normalized scores
                     'num_candidates': 1
                 })
             return ranking_examples
@@ -104,14 +151,13 @@ def train_ranking_reward_model(args):
             for example in ranking_examples:
                 query = example['query']
                 explanation = example['explanations'][0]
-                score = example['scores'][0]
-                
+                normalized_score = example['scores'][0]  # Already normalized
+
                 regression_examples.append({
                     'query': query,
                     'explanation': explanation,
-                    'score': score,
-                    'normalized_score': score / 2.0,  # Normalize to [0, 1]
-                    'normalized_scores': [s / 2.0 for s in example['scores']]
+                    'score': normalized_score,
+                    'normalized_score': normalized_score  # Already normalized
                 })
             return regression_examples
 
@@ -119,12 +165,21 @@ def train_ranking_reward_model(args):
         val_data = convert_to_ranking_format('validation')
 
     elif args.dataset == 'ds_critique':
-        from datasets import load_from_disk
+        from datasets import load_from_disk, DatasetDict
 
         data_dir = 'data/processed/comprehensive_ranking_dataset'
+        # Try workspace-relative path first, then parent directory
+        if not os.path.exists(data_dir):
+            data_dir = '/Users/tanmoy/research/PPO_learning_to_rank/PPO_Learning_to_rank/data/processed/comprehensive_ranking_dataset'
         full_dataset = load_from_disk(data_dir)
 
         train_ds = full_dataset['train'].filter(lambda x: x['source'] == 'ds-critique')
+
+        # Note: ds-critique validation set has only 5 queries with ~666 candidates each
+        # This is not realistic. For better validation, we'll sample from training set
+        print("Warning: ds-critique validation set has only 5 queries with 666+ candidates each.")
+        print("For more realistic validation, consider using --val_subset_size to sample fewer examples per query.")
+
         val_ds = full_dataset['validation'].filter(lambda x: x['source'] == 'ds-critique')
 
         def convert_format(example):
@@ -182,10 +237,25 @@ def train_ranking_reward_model(args):
                 if len(explanations) < 2:
                     continue
 
+                # For validation, limit candidates per query to avoid artificial perfect scores
+                # (ds-critique has 666 candidates per query which makes metrics meaningless)
+                max_candidates_per_query = 50
+                if len(explanations) > max_candidates_per_query and split == 'validation':
+                    # Randomly sample to get diverse quality scores
+                    import random
+                    indices = list(range(len(explanations)))
+                    random.shuffle(indices)
+                    indices = indices[:max_candidates_per_query]
+                    explanations = [explanations[i] for i in indices]
+                    scores = [scores[i] for i in indices]
+
+                # Normalize scores to [0, 1] (scores are 1-5)
+                normalized_scores = [(s - 1) / 4.0 for s in scores]
+
                 ranking_example = {
                     'query': _format_as_query(group_data['question']),
                     'explanations': explanations,
-                    'scores': scores,
+                    'scores': normalized_scores,  # Store normalized scores
                     'num_candidates': len(explanations)
                 }
                 ranking_examples.append(ranking_example)
@@ -196,13 +266,12 @@ def train_ranking_reward_model(args):
             regression_examples = []
             for example in ranking_examples:
                 query = example['query']
-                for exp, score in zip(example['explanations'], example['scores']):
+                for exp, normalized_score in zip(example['explanations'], example['scores']):
                     regression_examples.append({
                         'query': query,
                         'explanation': exp,
-                        'score': score,
-                        'normalized_score': (score - 1) / 4.0,  # Normalize to [0, 1]
-                        'normalized_scores': [(s - 1) / 4.0 for s in example['scores']]
+                        'score': normalized_score,
+                        'normalized_score': normalized_score  # Already normalized
                     })
             return regression_examples
 
@@ -256,10 +325,13 @@ def train_ranking_reward_model(args):
                 if len(explanations) < 2:
                     continue
 
+                # Normalize scores to [0, 1] (scores are 1-3)
+                normalized_scores = [(s - 1) / 2.0 for s in scores]
+
                 ranking_example = {
                     'query': _format_as_query(group_data['question']),
                     'explanations': explanations,
-                    'scores': scores,
+                    'scores': normalized_scores,  # Store normalized scores
                     'num_candidates': len(explanations)
                 }
                 ranking_examples.append(ranking_example)
@@ -270,13 +342,12 @@ def train_ranking_reward_model(args):
             regression_examples = []
             for example in ranking_examples:
                 query = example['query']
-                for exp, score in zip(example['explanations'], example['scores']):
+                for exp, normalized_score in zip(example['explanations'], example['scores']):
                     regression_examples.append({
                         'query': query,
                         'explanation': exp,
-                        'score': score,
-                        'normalized_score': (score - 1) / 2.0,  # Normalize to [0, 1]
-                        'normalized_scores': [(s - 1) / 2.0 for s in example['scores']]
+                        'score': normalized_score,
+                        'normalized_score': normalized_score  # Already normalized
                     })
             return regression_examples
 
@@ -286,11 +357,40 @@ def train_ranking_reward_model(args):
     elif args.dataset == 'stackexchange':
         from datasets import load_dataset
 
-        dataset = load_dataset("lvwerra/stack-exchange-paired")
+        try:
+            # Try to load the dataset
+            dataset = load_dataset("lvwerra/stack-exchange-paired")
 
-        def convert_to_ranking_format(split):
+            # Check available splits
+            available_splits = list(dataset.keys())
+            print(f"Available splits: {available_splits}")
+
+            # Use train split and create our own validation split
+            if 'train' in available_splits:
+                train_split = dataset['train']
+                # Split train into train/val (90/10)
+                train_size = int(0.9 * len(train_split))
+                train_data_raw = train_split.select(range(train_size))
+                val_data_raw = train_split.select(range(train_size, len(train_split)))
+            else:
+                # If train doesn't exist, use first available split
+                split_name = available_splits[0]
+                print(f"Warning: 'train' split not found, using '{split_name}' instead")
+                full_data = dataset[split_name]
+                train_size = int(0.9 * len(full_data))
+                train_data_raw = full_data.select(range(train_size))
+                val_data_raw = full_data.select(range(train_size, len(full_data)))
+
+        except Exception as e:
+            print(f"Error loading stackexchange dataset: {e}")
+            print("Falling back to ds_critique dataset")
+            args.dataset = 'ds_critique'
+            # Recursively call with ds_critique (hacky but works)
+            raise ValueError("StackExchange dataset unavailable, please use --dataset ds_critique")
+
+        def convert_to_ranking_format(data_split):
             ranking_examples = []
-            for example in dataset[split]:
+            for example in data_split:
                 query = example['question']
                 chosen_answer = example['response_j']
                 rejected_answer = example['response_k']
@@ -298,7 +398,7 @@ def train_ranking_reward_model(args):
                 ranking_examples.append({
                     'query': query,
                     'explanations': [chosen_answer, rejected_answer],
-                    'scores': [1, 0],
+                    'scores': [1.0, 0.0],  # Already normalized
                     'num_candidates': 2
                 })
             return ranking_examples
@@ -313,21 +413,19 @@ def train_ranking_reward_model(args):
                 regression_examples.append({
                     'query': query,
                     'explanation': chosen_answer,
-                    'score': 1,
-                    'normalized_score': 1.0,
-                    'normalized_scores': [1.0, 0.0]
+                    'score': 1.0,
+                    'normalized_score': 1.0
                 })
                 regression_examples.append({
                     'query': query,
                     'explanation': rejected_answer,
-                    'score': 0,
-                    'normalized_score': 0.0,
-                    'normalized_scores': [1.0, 0.0]
+                    'score': 0.0,
+                    'normalized_score': 0.0
                 })
             return regression_examples
 
-        train_data = convert_to_ranking_format('train')
-        val_data = convert_to_ranking_format('test') # Using test set for validation as there is no validation set
+        train_data = convert_to_ranking_format(train_data_raw)
+        val_data = convert_to_ranking_format(val_data_raw)
 
     elif args.dataset == 'dialogue':
         from datasets import load_dataset
@@ -352,6 +450,7 @@ def train_ranking_reward_model(args):
                 act = example['act']
 
                 score = _calculate_score(dialogue, topic, emotion, act)
+                normalized_score = score / 10.0  # Normalize to [0, 1]
 
                 for i in range(1, len(dialogue)):
                     query = "\n".join(dialogue[:i])
@@ -360,7 +459,7 @@ def train_ranking_reward_model(args):
                     ranking_examples.append({
                         'query': query,
                         'explanations': [explanation],
-                        'scores': [score],
+                        'scores': [normalized_score],  # Store normalized score
                         'num_candidates': 1
                     })
             return ranking_examples
@@ -370,14 +469,13 @@ def train_ranking_reward_model(args):
             for example in ranking_examples:
                 query = example['query']
                 explanation = example['explanations'][0]
-                score = example['scores'][0]
+                normalized_score = example['scores'][0]  # Already normalized
 
                 regression_examples.append({
                     'query': query,
                     'explanation': explanation,
-                    'score': score,
-                    'normalized_score': score / 10.0,  # Normalize to [0, 1]
-                    'normalized_scores': [s / 10.0 for s in example['scores']]
+                    'score': normalized_score,
+                    'normalized_score': normalized_score  # Already normalized
                 })
             return regression_examples
 
@@ -399,37 +497,65 @@ def train_ranking_reward_model(args):
 
     # Initialize model
     print(f"Initializing model: {args.base_model}")
+    if args.use_quantization:
+        print("Note: Quantization enabled - model will be loaded with device_map='auto'")
+
     model = RankingRewardModel(
         base_model=args.base_model,
         output_mode="regression",
-        dropout=args.dropout
+        dropout=args.dropout,
+        use_quantization=args.use_quantization
     )
 
-    if args.use_cuda and torch.cuda.is_available():
-        model = model.cuda()
-        print("Using CUDA")
-    elif torch.backends.mps.is_available():
-        model = model.to('mps')
-        print("Using MPS (Metal Performance Shaders)")
+    # Only move model if not using quantization (quantization handles device placement)
+    if not args.use_quantization:
+        if args.use_cuda and torch.cuda.is_available():
+            model = model.cuda()
+            print("Using CUDA")
+        elif torch.backends.mps.is_available():
+            model = model.to('mps')
+            print("Using MPS (Metal Performance Shaders)")
+        else:
+            print("Using CPU")
     else:
-        print("Using CPU")
+        print("Device placement handled by quantization (device_map='auto')")
 
     # Create datasets and dataloaders
-    train_dataset = RankingDataset(train_regression, model.tokenizer)
-    val_dataset = RankingDataset(val_regression, model.tokenizer)
+    train_dataset = RankingDataset(train_regression, model.tokenizer, pre_tokenize=True)
+    val_dataset = RankingDataset(val_regression, model.tokenizer, pre_tokenize=True)
+
+    # Determine device for pin_memory (only useful for CUDA)
+    use_pin_memory = args.use_cuda and torch.cuda.is_available()
+
+    # For MPS, we need to be careful with num_workers
+    # MPS works best with num_workers > 0, but pin_memory should be False
+    actual_num_workers = args.num_workers
+    if torch.backends.mps.is_available() and not torch.cuda.is_available():
+        # MPS is available and CUDA is not
+        if actual_num_workers == 0:
+            print("Warning: num_workers=0 with MPS may be slow. Consider using --num_workers 2 or higher.")
+
+    # Use functools.partial to pass tokenizer to collate_fn
+    collate_fn = partial(collate_fn_dynamic_padding, tokenizer=model.tokenizer)
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=0  # Use 0 for compatibility
+        num_workers=actual_num_workers,
+        pin_memory=use_pin_memory,
+        collate_fn=collate_fn,
+        persistent_workers=actual_num_workers > 0  # Keep workers alive between epochs
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=0
+        num_workers=actual_num_workers,
+        pin_memory=use_pin_memory,
+        collate_fn=collate_fn,
+        persistent_workers=actual_num_workers > 0
     )
 
     # Setup optimizer and scheduler
@@ -448,6 +574,9 @@ def train_ranking_reward_model(args):
 
     print(f"\nStarting training for {args.num_epochs} epochs...")
 
+    # Track all epoch metrics
+    epoch_metrics_history = []
+
     global_step = 0
     for epoch in range(args.num_epochs):
         # Training
@@ -458,14 +587,16 @@ def train_ranking_reward_model(args):
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.num_epochs}")
 
         for batch_idx, batch in enumerate(progress_bar):
+            # Get data (already on correct device via pin_memory)
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
             scores = batch['scores']
 
+            # Move to device (pin_memory + non_blocking makes this async for CUDA)
             if args.use_cuda and torch.cuda.is_available():
-                input_ids = input_ids.cuda()
-                attention_mask = attention_mask.cuda()
-                scores = scores.cuda()
+                input_ids = input_ids.cuda(non_blocking=True)
+                attention_mask = attention_mask.cuda(non_blocking=True)
+                scores = scores.cuda(non_blocking=True)
             elif torch.backends.mps.is_available():
                 input_ids = input_ids.to('mps')
                 attention_mask = attention_mask.to('mps')
@@ -474,8 +605,41 @@ def train_ranking_reward_model(args):
             # Forward pass
             pred_scores = model(input_ids, attention_mask)
 
-            # MSE loss for regression
-            loss = torch.nn.functional.mse_loss(pred_scores, scores)
+            # Choose loss function based on args
+            if args.loss_function == 'mse':
+                # MSE loss for regression
+                loss = torch.nn.functional.mse_loss(pred_scores, scores)
+            elif args.loss_function == 'listnet':
+                # ListNet loss - better for ranking
+                from ranking_models import RankingLosses
+                loss = RankingLosses.listnet_loss(pred_scores.unsqueeze(0), scores.unsqueeze(0))
+            elif args.loss_function == 'ranknet':
+                # RankNet pairwise loss
+                from ranking_models import RankingLosses
+                # Create pairwise comparisons
+                batch_size = pred_scores.size(0)
+                if batch_size > 1:
+                    i_indices = torch.arange(batch_size).repeat_interleave(batch_size)
+                    j_indices = torch.arange(batch_size).repeat(batch_size)
+                    mask = i_indices != j_indices
+                    i_indices = i_indices[mask]
+                    j_indices = j_indices[mask]
+                    loss = RankingLosses.ranknet_loss(
+                        pred_scores[i_indices], pred_scores[j_indices],
+                        scores[i_indices], scores[j_indices]
+                    )
+                else:
+                    loss = torch.nn.functional.mse_loss(pred_scores, scores)
+            elif args.loss_function == 'listmle':
+                # ListMLE loss
+                from ranking_models import RankingLosses
+                loss = RankingLosses.listmle_loss(pred_scores.unsqueeze(0), scores.unsqueeze(0))
+            elif args.loss_function == 'approxndcg':
+                # ApproxNDCG loss - directly optimizes NDCG
+                from ranking_models import RankingLosses
+                loss = RankingLosses.approxndcg_loss(pred_scores.unsqueeze(0), scores.unsqueeze(0))
+            else:
+                raise ValueError(f"Unknown loss function: {args.loss_function}")
 
             # Scale loss for gradient accumulation
             loss = loss / args.gradient_accumulation_steps
@@ -515,49 +679,53 @@ def train_ranking_reward_model(args):
         if writer is not None:
             writer.add_scalar('Loss/train_epoch', avg_train_loss, epoch + 1)
 
-        # Validation
-        print("\nRunning validation...")
-        model.eval()
-        evaluator = RankingEvaluator()
+        # Validation (with optional frequency control)
+        should_validate = (epoch + 1) % args.val_frequency == 0 or (epoch + 1) == args.num_epochs
 
-        # Create a new val_data list with normalized scores
-        val_data_normalized = []
-        for item in val_data:
+        if should_validate:
+            # Skip validation for ds_critique (only 5 queries, metrics are meaningless)
             if args.dataset == 'ds_critique':
-                normalized_scores = [(s - 1) / 4.0 for s in item['scores']]
-            elif args.dataset == 'esnli':
-                normalized_scores = [(s - 1) / 2.0 for s in item['scores']]
-            elif args.dataset == 'chaosnli':
-                normalized_scores = [s / 2.0 for s in item['scores']]
-            elif args.dataset == 'stackexchange':
-                normalized_scores = [1.0, 0.0]
-            elif args.dataset == 'dialogue':
-                normalized_scores = [s / 10.0 for s in item['scores']]
+                print("\nSkipping validation (ds_critique has only 5 queries - use demo_ranking_quality.py instead)")
+                val_results = {}
             else:
-                normalized_scores = item['scores']
+                print("\nRunning validation...")
+                model.eval()
+                evaluator = RankingEvaluator()
 
-            val_data_normalized.append({
-                'query': item['query'],
-                'explanations': item['explanations'],
-                'scores': normalized_scores
-            })
+                # Use subset for faster validation if specified
+                val_data_subset = val_data[:args.val_subset_size] if args.val_subset_size > 0 else val_data
+                if args.val_subset_size > 0:
+                    print(f"Validating on subset of {len(val_data_subset)}/{len(val_data)} examples")
 
-        val_results = evaluator.evaluate(model, val_data_normalized, relevance_threshold=args.relevance_threshold)
+                val_results = evaluator.evaluate(model, val_data_subset)
+        else:
+            print(f"\nSkipping validation (runs every {args.val_frequency} epochs)")
+            val_results = {}
 
         # Log results
         print(f"\n{'='*60}")
         print(f"Epoch {epoch+1}/{args.num_epochs}")
         print(f"{'='*60}")
         print(f"Train Loss: {avg_train_loss:.4f}")
-        print(f"Val NDCG@1: {val_results.get('ndcg@1', 0):.4f}")
-        print(f"Val NDCG@3: {val_results.get('ndcg@3', 0):.4f}")
-        print(f"Val NDCG@5: {val_results.get('ndcg@5', 0):.4f}")
-        print(f"Val MAP: {val_results.get('map', 0):.4f}")
-        print(f"Val Spearman: {val_results.get('spearman', 0):.4f}")
+
+        # Store epoch metrics
+        epoch_metrics = {
+            'epoch': epoch + 1,
+            'train_loss': avg_train_loss,
+        }
+        if val_results:
+            print(f"Val NDCG@1: {val_results.get('ndcg@1', 0):.4f}")
+            print(f"Val NDCG@3: {val_results.get('ndcg@3', 0):.4f}")
+            print(f"Val NDCG@5: {val_results.get('ndcg@5', 0):.4f}")
+            print(f"Val MAP: {val_results.get('map', 0):.4f}")
+            print(f"Val Spearman: {val_results.get('spearman', 0):.4f}")
+            epoch_metrics.update(val_results)
+
+        epoch_metrics_history.append(epoch_metrics)
         print(f"{'='*60}\n")
 
         # Log to TensorBoard
-        if writer is not None:
+        if writer is not None and val_results:
             writer.add_scalar('Metrics/val_ndcg@1', val_results.get('ndcg@1', 0), epoch + 1)
             writer.add_scalar('Metrics/val_ndcg@3', val_results.get('ndcg@3', 0), epoch + 1)
             writer.add_scalar('Metrics/val_ndcg@5', val_results.get('ndcg@5', 0), epoch + 1)
@@ -566,7 +734,7 @@ def train_ranking_reward_model(args):
             writer.add_scalar('Metrics/val_kendall_tau', val_results.get('kendall_tau', 0), epoch + 1)
             writer.add_scalar('Metrics/val_spearman', val_results.get('spearman', 0), epoch + 1)
 
-        if args.use_wandb:
+        if args.use_wandb and val_results:
             import wandb
             log_dict = {
                 'epoch': epoch + 1,
@@ -575,21 +743,22 @@ def train_ranking_reward_model(args):
             log_dict.update({f'val_{k}': v for k, v in val_results.items() if not k.endswith('_std')})
             wandb.log(log_dict)
 
-        # Save best model
-        val_score = val_results.get('ndcg@5', val_results.get('spearman', 0))
-        if val_score > best_val_score:
-            best_val_score = val_score
+        # Save best model (only when validation was run)
+        if val_results:
+            val_score = val_results.get('ndcg@5', val_results.get('spearman', 0))
+            if val_score > best_val_score:
+                best_val_score = val_score
 
-            save_path = os.path.join(args.output_dir, 'best_model.pt')
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_score': val_score,
-                'val_results': val_results
-            }, save_path)
+                save_path = os.path.join(args.output_dir, 'best_model.pt')
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'val_score': val_score,
+                    'val_results': val_results
+                }, save_path)
 
-            print(f"Saved best model with val score: {val_score:.4f}\n")
+                print(f"Saved best model with val score: {val_score:.4f}\n")
 
     # Save final model
     final_path = os.path.join(args.output_dir, 'final_model.pt')
@@ -603,46 +772,114 @@ def train_ranking_reward_model(args):
     }, final_path)
     print(f"Saved final model to {final_path}")
 
+    # Save training metrics history
+    import json
+    metrics_path = os.path.join(args.output_dir, 'training_metrics.json')
+    with open(metrics_path, 'w') as f:
+        json.dump(epoch_metrics_history, f, indent=2)
+    print(f"Training metrics saved to {metrics_path}")
+
     # Close TensorBoard writer
     if writer is not None:
         writer.close()
         print(f"TensorBoard logs saved to {tb_log_dir}")
         print(f"   View with: tensorboard --logdir={tb_log_dir}")
 
-    return model
+    # Return model and summary metrics
+    summary_metrics = {
+        'best_val_score': best_val_score,
+        'best_ndcg@5': best_val_score,  # Assuming ndcg@5 was the primary metric
+        'final_epoch': args.num_epochs,
+        'metrics_history': epoch_metrics_history
+    }
+
+    return model, summary_metrics
 
 
 class RankingDataset(torch.utils.data.Dataset):
     """Dataset for ranking reward model training"""
 
-    def __init__(self, data, tokenizer, max_length=256):
+    def __init__(self, data, tokenizer, max_length=256, pre_tokenize=True):
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
+
+        # Pre-tokenize all data for significant speedup
+        if pre_tokenize:
+            print("Pre-tokenizing dataset...")
+            self.tokenized_data = []
+            for item in tqdm(data, desc="Tokenizing"):
+                text = f"{item['query']} {tokenizer.sep_token} {item['explanation']}"
+                encoded = tokenizer(
+                    text,
+                    truncation=True,
+                    max_length=max_length,
+                    padding=False,  # Will use dynamic padding in collate_fn
+                    return_tensors=None
+                )
+                self.tokenized_data.append({
+                    'input_ids': encoded['input_ids'],
+                    'attention_mask': encoded['attention_mask'],
+                    'score': item['normalized_score']
+                })
+        else:
+            self.tokenized_data = None
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        item = self.data[idx]
+        if self.tokenized_data is not None:
+            # Return pre-tokenized data
+            item = self.tokenized_data[idx]
+            return {
+                'input_ids': item['input_ids'],
+                'attention_mask': item['attention_mask'],
+                'scores': item['score']
+            }
+        else:
+            # Fallback to on-the-fly tokenization
+            item = self.data[idx]
+            text = f"{item['query']} {self.tokenizer.sep_token} {item['explanation']}"
+            encoded = self.tokenizer(
+                text,
+                truncation=True,
+                max_length=self.max_length,
+                padding='max_length',
+                return_tensors='pt'
+            )
+            return {
+                'input_ids': encoded['input_ids'].squeeze(),
+                'attention_mask': encoded['attention_mask'].squeeze(),
+                'scores': torch.tensor(item['normalized_score'], dtype=torch.float)
+            }
 
-        # Combine query and explanation
-        text = f"{item['query']} {self.tokenizer.sep_token} {item['explanation']}"
 
-        # Tokenize
-        encoded = self.tokenizer(
-            text,
-            truncation=True,
-            max_length=self.max_length,
-            padding='max_length',
-            return_tensors='pt'
-        )
+def collate_fn_dynamic_padding(batch, tokenizer):
+    """Custom collate function with dynamic padding"""
+    # Find max length in this batch
+    max_len = max(len(item['input_ids']) for item in batch)
 
-        return {
-            'input_ids': encoded['input_ids'].squeeze(),
-            'attention_mask': encoded['attention_mask'].squeeze(),
-            'scores': torch.tensor(item['normalized_score'], dtype=torch.float)
-        }
+    input_ids = []
+    attention_masks = []
+    scores = []
+
+    for item in batch:
+        # Pad to max length in batch
+        pad_len = max_len - len(item['input_ids'])
+
+        padded_input_ids = item['input_ids'] + [tokenizer.pad_token_id] * pad_len
+        padded_attention_mask = item['attention_mask'] + [0] * pad_len
+
+        input_ids.append(padded_input_ids)
+        attention_masks.append(padded_attention_mask)
+        scores.append(item['scores'])
+
+    return {
+        'input_ids': torch.tensor(input_ids, dtype=torch.long),
+        'attention_mask': torch.tensor(attention_masks, dtype=torch.long),
+        'scores': torch.tensor(scores, dtype=torch.float)
+    }
 
 
 if __name__ == "__main__":
@@ -669,8 +906,19 @@ if __name__ == "__main__":
                            help='Number of gradient accumulation steps (default: 1)')
     parser.add_argument('--dataset', type=str, default='ds_critique',
                            help='Dataset to use for training (ds_critique, esnli, chaosnli)')
-    parser.add_argument('--relevance_threshold', type=float, default=0.75,
-                       help='Relevance threshold for MAP calculation')
+    parser.add_argument('--num_workers', type=int, default=4,
+                           help='Number of DataLoader workers (default: 4, use 0 for debugging)')
+    parser.add_argument('--val_frequency', type=int, default=1,
+                           help='Validate every N epochs (default: 1)')
+    parser.add_argument('--val_subset_size', type=int, default=0,
+                           help='Use subset of validation data (0=use all, >0=use subset)')
+    parser.add_argument('--use_quantization', action='store_true',
+                           help='Use 4-bit/8-bit quantization for large models (requires bitsandbytes)')
+    parser.add_argument('--loss_function', type=str, default='mse',
+                           choices=['mse', 'listnet', 'ranknet', 'listmle', 'approxndcg'],
+                           help='Loss function to use (default: mse). Options: mse (fast, may compress scores), '
+                                'listnet (better ranking), ranknet (pairwise), listmle (listwise), '
+                                'approxndcg (directly optimizes NDCG)')
     args = parser.parse_args()
 
     print("="*60)
@@ -680,6 +928,7 @@ if __name__ == "__main__":
     print(f"Batch size: {args.batch_size}")
     print(f"Learning rate: {args.learning_rate}")
     print(f"Num epochs: {args.num_epochs}")
+    print(f"Loss function: {args.loss_function}")
     print(f"Output dir: {args.output_dir}")
     print(f"Use CUDA: {args.use_cuda}")
     print(f"Use wandb: {args.use_wandb}")
