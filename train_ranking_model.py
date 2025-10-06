@@ -785,7 +785,15 @@ def train_ranking_reward_model(args):
         print(f"TensorBoard logs saved to {tb_log_dir}")
         print(f"   View with: tensorboard --logdir={tb_log_dir}")
 
-    return model
+    # Return model and summary metrics
+    summary_metrics = {
+        'best_val_score': best_val_score,
+        'best_ndcg@5': best_val_score,  # Assuming ndcg@5 was the primary metric
+        'final_epoch': args.num_epochs,
+        'metrics_history': epoch_metrics_history
+    }
+
+    return model, summary_metrics
 
 
 class RankingDataset(torch.utils.data.Dataset):
