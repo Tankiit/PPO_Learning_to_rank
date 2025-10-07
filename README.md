@@ -1,99 +1,55 @@
-# PPO Learning to Rank
+# Anonymous Submission: Ranking Model Training with PPO
 
-This repository contains a comprehensive PPO (Proximal Policy Optimization) implementation for learning to rank tasks, specifically focused on explanation quality ranking for natural language inference datasets.
+This repository contains a minimal working implementation for training ranking models with PPO (Proximal Policy Optimization) experiments.
 
-## Overview
+## Quick Start
 
-The project implements PPO-based reward learning for ranking explanations across multiple datasets in natural language inference tasks. It includes dataset creation, model training, and evaluation components.
+1. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-## Key Components
+2. **Train a simple ranking model:**
+   ```bash
+   python train_ranking_model.py --dataset chaosnli --use_cuda --num_epochs 10
+   ```
 
-### 1. Dataset Creation (`create_dataset.py`)
-- **ComprehensiveDatasetBuilder**: Creates cross-source explanation ranking datasets in HuggingFace-friendly format
-- Supports multiple NLI datasets: e-SNLI, Alpha-NLI, Delta-NLI, WinoWhy, Sens-Making, DS-Critique
-- Generates quality-ranked explanation candidates from excellent (4) to nonsense (0)
-- Saves normalized per-source datasets and merged comprehensive dataset
+3. **Train with PPO:**
+   ```bash
+   python train_ppo_ranking.py --use_cuda --num_epochs 10
+   ```
 
-### 2. Model Evaluation (`evaluate_model.py`)
-- Comprehensive evaluation framework for ranking models
-- Evaluates explanation quality ranking across multiple metrics
-- Supports visualizations and detailed reporting
-- Integration with PPO training pipeline
+## Key Features
 
-### 3. Dataset Structure
-- **Query-level format**: `{premise, hypothesis, label, gold_explanation, source, query_text, query_id}`
-- **Ranking format**: `{query_id, source, premise, hypothesis, label, query_text, candidate, quality_score, generation_method}`
+- **Multiple Training Approaches**: Supervised learning and PPO for ranking tasks
+- **Flexible Data Support**: Easy data loading for ranking tasks
+- **Model Compatibility**: Supports BERT, RoBERTa, and large language models with quantization
+- **Comprehensive Evaluation**: NDCG, MAP, MRR, and other ranking metrics
 
-## Quality Levels
+## Files Included
 
-The dataset includes 5 quality levels for explanations:
-- **4 (Excellent)**: Gold/high-quality explanations with detailed reasoning
-- **3 (Good)**: Correct but brief explanations  
-- **2 (Fair)**: Simple, basic explanations
-- **1 (Poor)**: Incorrect explanations with wrong labels
-- **0 (Nonsense)**: Random, irrelevant explanations
+- `ranking_models.py` - Core ranking model implementation
+- `ranking_evaluator.py` - Evaluation metrics for ranking models
+- `train_ranking_model.py` - Full training script with multiple datasets
+- `train_ppo_ranking.py` - PPO-based training script
+- `requirements.txt` - Required Python packages
 
-## Usage
+## Supported Datasets
 
-### Creating Datasets
-```python
-from create_dataset import ComprehensiveDatasetBuilder
+- ChaosNLI
+- DS Critique Bank
+- e-SNLI
+- Stack Exchange
+- Daily Dialog
 
-config = {
-    "max_samples_per_source": 10000,
-    "samples_per_query": 5,
-    "output_long_table_name": "comprehensive_ranking_dataset"
-}
+## Technical Details
 
-builder = ComprehensiveDatasetBuilder(config)
-dataset = builder.create_comprehensive_dataset(
-    sources=["e-snli", "delta-nli", "winowhy", "ds-critique"],
-    output_dir="data"
-)
-```
+- **Framework**: PyTorch with Transformers
+- **Models**: BERT, RoBERTa, DistilBERT, and large language models
+- **Quantization**: 4-bit and 8-bit quantization support for large models
+- **Loss Functions**: MSE, ListNet, RankNet, ListMLE, ApproxNDCG
+- **Evaluation**: Comprehensive ranking metrics with batched inference
 
-### Evaluating Models
-```python
-from evaluate_model import ModelEvaluator
+## Anonymous Submission
 
-evaluator = ModelEvaluator()
-results = evaluator.evaluate_model(model_path, dataset_path)
-```
-
-## Features
-
-- **Multi-source support**: Aggregates data from multiple NLI datasets
-- **Quality ranking**: Implements explanation quality scoring from excellent to nonsense
-- **Configurable generation**: Supports both template-based and model-generated explanations
-- **Comprehensive evaluation**: Multiple ranking metrics and visualizations
-- **HuggingFace integration**: Native compatibility with HF datasets and models
-
-## Dataset Sources
-
-- **e-SNLI**: Entailment-based explanation dataset
-- **Alpha-NLI**: Commonsense reasoning with explanations
-- **Delta-NLI**: Defeasible reasoning dataset
-- **WinoWhy**: Winograd schema with explanations
-- **Sens-Making**: Sentence making tasks with rationales
-- **DS-Critique**: Synthetic data science critique bank style data
-
-## Configuration
-
-The system supports extensive configuration for:
-- Dataset sampling parameters
-- Quality generation strategies
-- Model selection for generation
-- Output formatting and organization
-
-## Requirements
-
-- Python 3.8+
-- PyTorch
-- Transformers
-- Datasets
-- NumPy
-- tqdm
-
-## License
-
-This project is licensed under the MIT License.
+This code is submitted anonymously for review. All implementation details and technical contributions are provided for evaluation purposes.
