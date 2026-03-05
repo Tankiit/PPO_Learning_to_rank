@@ -18,6 +18,7 @@ experiments/**/visualizations/
 
 # Claude files
 .claude/
+*.md
 *.MD
 claude.MD
 
@@ -91,3 +92,13 @@ experiments/**/checkpoints/
 experiments/**/results/
 experiments/**/outputs/
 experiments/**/*.json
+
+# Backup files
+backup_*/
+*.bak
+*.bak2
+*~
+*.old
+
+# Evaluation results
+evaluation_results/
