@@ -36,8 +36,7 @@ from tqdm import tqdm
 from src.models.ranking_reward_model import RankingRewardModel
 from src.losses.ranking_losses import get_loss_function
 from src.evaluation.metrics import compute_ranking_metrics
-# TODO: Import your actual data loading
-# from src.data.graded_nli_builder import GradedNLIDataset
+from src.data.loader_bridge import get_data_loaders
 
 
 def set_seed(seed: int):
@@ -71,7 +70,7 @@ def parse_args():
     
     # Data
     parser.add_argument("--dataset", type=str, default="multinli",
-                        choices=["esnli", "multinli", "deltanli", "winowhy", "ds_critique"])
+                        choices=["esnli", "chaosnli", "multinli", "deltanli", "delta_nli", "delta-nli", "winowhy", "ds_critique"])
     parser.add_argument("--data_method", type=str, default="heuristic",
                         choices=["heuristic", "graded_delta", "overlap"],
                         help="Data creation method (Table 3 ablation)")
@@ -251,26 +250,7 @@ def main():
     # =========================================================================
     # Data
     # =========================================================================
-    # TODO: Replace with your actual data loading
-    # train_dataset = GradedNLIDataset(
-    #     dataset_name=args.dataset,
-    #     split="train",
-    #     method=args.data_method,
-    #     tokenizer=model.tokenizer,
-    #     max_length=args.max_length,
-    #     candidates_per_query=args.candidates_per_query,
-    #     seed=args.seed,
-    # )
-    # val_dataset = GradedNLIDataset(
-    #     dataset_name=args.dataset,
-    #     split="validation",
-    #     ...
-    # )
-    
-    # PLACEHOLDER — remove once real data loading works
-    print("WARNING: Using placeholder data. Wire up your dataset loaders.")
-    from src.data.placeholder import create_placeholder_data
-    train_loader, val_loader = create_placeholder_data(args, model.tokenizer, device)
+    train_loader, val_loader = get_data_loaders(args, model.tokenizer)
     
     # =========================================================================
     # Optimizer
