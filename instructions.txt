@@ -1,0 +1,190 @@
+# Ranking-Based Reward Models for Explanation Quality
+
+Multi-seed experiments for the ARR resubmission. This repo reproduces all
+paper tables with confidence intervals and significance tests.
+
+---
+
+## Quick Start
+
+```bash
+# 1. Clone and install
+git clone <repo-url> && cd repo
+pip install torch transformers datasets huggingface_hub scipy tqdm
+
+# 2. Test pipeline works (< 2 minutes)
+python -m src.train --dataset ds_critique --loss listnet --epochs 2 --output_dir test_run
+
+# 3. If that works, you're ready. See your assigned tasks below.
+```
+
+---
+
+## Task Assignments
+
+Tasks are ordered by priority — complete Task 1, then Task 2, then Task 3, and finally Task 4 if time remains. If GPU time is limited, Task 1 is the most important.
+
+### Task 1: DS-Critique Bank Experiments (NEW — reviewer response)
+**Priority: CRITICAL** · **Time: ~20h on V100**
+
+This is the non-NLI experiment that directly addresses reviewer criticism
+("evaluation confined to NLI tasks"). It runs our loss comparison on science
+reasoning data from the Digital Socrates Critique Bank.
+
+```bash
+bash scripts/run_ds_critique_experiments.sh
+```
+
+This trains MSE, Binary, RankNet, ApproxNDCG, ListNet × 5 seeds = 25 runs
+on DS-Critique Bank, plus zero-shot transfer from NLI-trained models.
+
+**What to check:** After it finishes, look at the separation ratios:
+```bash
+python -m scripts.aggregate_results --input results/multi_seed/ds_critique
+```
+We expect MSE sep. ratio ~0.05–0.15, ListNet ~0.80–0.95 — same pattern
+as NLI, proving score compression is loss-level, not domain-specific.
+
+**Send back:** `tar czf ds_critique_results.tar.gz results/multi_seed/ds_critique/`
+
+---
+
+### Task 2: NLI Loss Function Comparison (Table 2 in paper)
+**Priority: HIGH** · **Time: ~15h on V100**
+
+> **⚠️ BLOCKED:** NLI data loaders need wiring first.
+> Tanmoy will provide updated `src/data/` files. Once received:
+
+```bash
+bash scripts/run_all_seeds.sh
+```
+
+This runs Experiment 1 only (loss comparison): 5 losses × 5 seeds = 25 runs.
+Skip Experiments 2 and 3 unless you have extra GPU time.
+
+**Send back:** `tar czf nli_loss_results.tar.gz results/multi_seed/loss_comparison/`
+
+---
+
+### Task 3: NLI Model Comparison (Table 1 in paper)
+**Priority: MEDIUM** · **Time: ~45h on V100**
+
+Same script as Task 2 — Experiment 2 runs automatically after Experiment 1.
+This trains BERT, RoBERTa, DeBERTa × 5 seeds = 15 runs.
+
+Decoder models (Phi-2, Mistral-7B) are commented out. Uncomment in
+`scripts/run_all_seeds.sh` lines 92–108 if GPU time allows, but encoders
+are sufficient for the paper.
+
+---
+
+### Task 4: Pooling Ablation (Appendix table)
+**Priority: LOW** · **Time: ~12h on V100**
+
+```bash
+bash scripts/run_pooling_ablation.sh
+```
+
+Compares mean, CLS, max, and attention pooling × 5 seeds.
+Only run this if Tasks 1–3 are done and GPU time remains.
+
+---
+
+## What Each Script Produces
+
+| Script | Output directory | Paper table |
+|--------|-----------------|-------------|
+| `run_ds_critique_experiments.sh` | `results/multi_seed/ds_critique/` | New Table: cross-domain validation |
+| `run_all_seeds.sh` (Exp 1) | `results/multi_seed/loss_comparison/` | Table 2: loss comparison |
+| `run_all_seeds.sh` (Exp 2) | `results/multi_seed/model_comparison/` | Table 1: model comparison |
+| `run_all_seeds.sh` (Exp 3) | `results/multi_seed/data_ablation/` | Table 3: data ablation |
+| `run_pooling_ablation.sh` | `results/multi_seed/pooling_ablation/` | Appendix: pooling ablation |
+
+After any experiment finishes:
+```bash
+python -m scripts.aggregate_results --input results/multi_seed/<experiment>
+```
+This produces `aggregated_results.json` and `latex_tables.tex` (copy-paste
+into paper).
+
+---
+
+## Repo Structure
+
+```text
+repo/
+├── src/
+│   ├── train.py                    ← Single entry point for all training
+│   ├── models/
+│   │   └── ranking_reward_model.py ← RoBERTa/BERT/DeBERTa + attention pooling + MLP
+│   ├── losses/
+│   │   └── ranking_losses.py       ← MSE, Binary, RankNet, ListNet, ApproxNDCG
+│   ├── data/
+│   │   ├── loader_bridge.py        ← Routes --dataset flag to correct loader
+│   │   ├── ds_critique_loader.py   ← DS-Critique Bank (fully working)
+│   │   └── placeholder.py          ← Fake data (used until NLI loaders wired)
+│   └── evaluation/
+│       └── metrics.py              ← NDCG, MAP, Spearman, bootstrap CIs
+│
+├── scripts/
+│   ├── run_ds_critique_experiments.sh  ← Task 1
+│   ├── run_all_seeds.sh                ← Tasks 2–3
+│   ├── run_pooling_ablation.sh         ← Task 4
+│   ├── aggregate_results.py            ← Results → LaTeX tables
+│   └── evaluate_zero_shot.py           ← NLI model → DS-Critique transfer
+│
+├── docs/
+│   └── DS_CRITIQUE_EXPERIMENTS.md      ← DS-Critique experiment details
+├── REPO_STEP_BY_STEP_GUIDE.md          ← Full data flow walkthrough
+└── MIGRATION_GUIDE.md                  ← Old repo → new repo file mapping
+```
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `ModuleNotFoundError: No module named 'src'` | Run from repo root: `cd /path/to/repo && python -m src.train ...` |
+| `No module named 'huggingface_hub'` | `pip install huggingface_hub` |
+| DS-Critique download fails | `huggingface-cli download allenai/DS_Critique_Bank --repo-type dataset --local-dir data/ds_critique_bank` |
+| CUDA out of memory | Use `--batch_size 8` instead of 16 |
+| NLI experiments use placeholder data | Expected — NLI loaders not wired yet. Run DS-Critique first. |
+| Script says "SKIP" for everything | Previous run exists. Delete output dir to re-run: `rm -rf results/multi_seed/ds_critique/loss_comparison/listnet/seed_42` |
+| Very few DS-Critique ranking groups | Some questions have few student models. Edit `min_candidates_per_query=2` in `src/data/loader_bridge.py` line ~148 |
+
+---
+
+## How to Send Results
+
+After experiments complete:
+
+```bash
+# Aggregate first (creates LaTeX tables)
+python -m scripts.aggregate_results --input results/multi_seed/ds_critique
+python -m scripts.aggregate_results --input results/multi_seed/loss_comparison
+
+# Package everything
+tar czf all_results.tar.gz results/
+
+# Send the tar file
+```
+
+Include the full `results/` directory — I need the per-seed `results.json`
+files to compute confidence intervals and significance tests for the paper.
+
+---
+
+## Key Metrics to Watch
+
+When reviewing output, these are the numbers that matter:
+
+- **Separation Ratio** — THE critical metric. Must be >0.8 for ListNet, <0.15 for MSE.
+  This proves our core claim about score compression.
+- **NDCG@5** — Ranking quality. ListNet should be >0.85, MSE <0.80.
+- **Spearman ρ** — Correlation with ground truth. ListNet >0.75, MSE <0.55.
+
+If separation ratio is high but NDCG is low, something is wrong with the
+data loading. If both are low, check that the loss function is correct.
+If both are high across MSE and ListNet, the data doesn't have enough
+quality variation (ranking is too easy).
