@@ -89,6 +89,13 @@ class RankingRewardModel(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_size // 2, num_labels)
         )
+        # Initialize projection head with small weights to prevent NaN
+        # Critical for DeBERTa-v3 which has larger hidden state magnitudes
+        for module in self.classifier.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight, gain=0.01)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
 
         if output_mode == "regression":
             # For regression, we want scores in [0, 1]
@@ -330,13 +337,19 @@ class RankingLosses:
 
     @staticmethod
     def listnet_loss(scores, labels, temp=1.0):
-        """ListNet loss - KL divergence between score distributions"""
-        # Convert to probabilities
-        y_pred = torch.softmax(scores / temp, dim=-1)
+        """ListNet loss with numerical stability for DeBERTa"""
+        # Clamp scores to prevent overflow in softmax
+        scores = scores.clamp(-50, 50)
+        labels = labels.clamp(-50, 50)
+
+        # Log-softmax is numerically more stable than softmax + log
+        log_pred = torch.log_softmax(scores / temp, dim=-1)
         y_true = torch.softmax(labels / temp, dim=-1)
 
-        # KL divergence
-        return torch.sum(y_true * torch.log(y_true / (y_pred + 1e-10)), dim=-1).mean()
+        # KL divergence: sum(p * (log_p - log_q))
+        # Using log_softmax avoids the log(softmax()) numerical issue
+        loss = torch.sum(y_true * (torch.log(y_true + 1e-10) - log_pred), dim=-1)
+        return loss.mean()
 
     @staticmethod
     def listmle_loss(scores, labels, eps=1e-10):

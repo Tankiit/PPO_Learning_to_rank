@@ -644,6 +644,14 @@ def train_ranking_reward_model(args):
             # Scale loss for gradient accumulation
             loss = loss / args.gradient_accumulation_steps
 
+            # NaN guard
+            if torch.isnan(loss):
+                print(f"WARNING: NaN loss at batch {batch_idx}, epoch {epoch+1}")
+                print(f"  pred_scores: min={pred_scores.min():.4f}, max={pred_scores.max():.4f}")
+                print(f"  true_scores: min={scores.min():.4f}, max={scores.max():.4f}")
+                optimizer.zero_grad()  # discard NaN gradients
+                continue
+
             # Backward pass
             loss.backward()
 
@@ -920,6 +928,11 @@ if __name__ == "__main__":
                                 'listnet (better ranking), ranknet (pairwise), listmle (listwise), '
                                 'approxndcg (directly optimizes NDCG)')
     args = parser.parse_args()
+
+    # Auto-adjust learning rate for DeBERTa (more sensitive to LR)
+    if 'deberta' in args.base_model.lower() and args.learning_rate >= 2e-5:
+        print(f"NOTE: Reducing learning rate from {args.learning_rate} to 1e-5 for DeBERTa")
+        args.learning_rate = 1e-5
 
     print("="*60)
     print("RANKING REWARD MODEL TRAINING")
