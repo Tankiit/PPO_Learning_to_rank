@@ -1,314 +1,259 @@
-import json
-from typing import Dict, List, Tuple, Optional
-from datasets import load_dataset, Dataset, DatasetDict
-import numpy as np
-from tqdm import tqdm
+"""
+DS-Critique Bank Data Loader for Ranking Experiments.
 
+Loads the AllenAI Digital Socrates Critique Bank dataset and converts it
+into the ranking format expected by our training pipeline.
+
+Key insight: DS-Critique Bank already has explanation_score (0-5) from
+multiple critique models (GPT-4, DS-13B, DS-7B) AND human annotations.
+We DON'T need to generate graded data — quality tiers already exist naturally
+because different student models (GPT-4, GPT-3.5, Llama-2-70B, Llama-2-7B)
+produce different quality explanations for the same question.
+
+Ranking groups: Each question has multiple student explanations (from different
+models) each scored 0-5. This gives us natural ranking candidates WITHOUT
+any synthetic data construction.
+
+Usage:
+    loader = DSCritiqueBankLoader()
+    train_data, val_data = loader.load_ranking_data()
+
+Note on HuggingFace loading bug:
+    load_dataset("allenai/DS_Critique_Bank") fails because some JSONL files
+    lack 'explanation_annotations' column. We download individual files instead.
+"""
+
+import json
 import os
+from typing import Dict, List, Tuple, Optional
+from collections import defaultdict
+import random
+
+try:
+    from huggingface_hub import hf_hub_download
+except ImportError:
+    hf_hub_download = None
+
+REPO_ID = "allenai/DS_Critique_Bank"
+
+ANNOTATED_FILES = {
+    "train": "DSCB-train-crowd-anno.jsonl",
+    "val": "DSCB-dev-crowd-anno.jsonl",
+}
+
+NON_ANNOTATED_FILES = {
+    "train_expert": "DSCB-train-expert.jsonl",
+    "train_non_anno": "DSCB-train-non-anno.jsonl",
+    "val_non_anno": "DSCB-dev-non-anno.jsonl",
+}
+
 
 class DSCritiqueBankLoader:
-    """
-    Loader for Digital Socrates Critique Bank dataset
-    Converts 5-point critique scores to training data for ranking reward models
-    """
-
-    def __init__(self, cache_dir: Optional[str] = None, data_dir: Optional[str] = 'data/processed/comprehensive_ranking_dataset', use_local: bool = True):
-        # Dynamically determine the project root
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+    def __init__(
+        self,
+        cache_dir: str = "data/ds_critique_bank",
+        use_human_scores: bool = True,
+        min_candidates_per_query: int = 3,
+        score_source: str = "best_available",
+        seed: int = 42,
+    ):
         self.cache_dir = cache_dir
-        self.dataset = None
-        self.score_mapping = {
-            1: "nonsensical",
-            2: "poor",
-            3: "fair",
-            4: "good",
-            5: "excellent"
-        }
-        self.data_dir = os.path.join(project_root, data_dir)
-        self.use_local = use_local
-    def load_dataset(self) -> DatasetDict:
-        """Load DS_Critique_Bank from HuggingFace or use local synthetic data"""
-        print("Loading Digital Socrates Critique Bank...")
+        self.use_human_scores = use_human_scores
+        self.min_candidates_per_query = min_candidates_per_query
+        self.score_source = score_source
+        self.seed = seed
+        random.seed(seed)
+        os.makedirs(cache_dir, exist_ok=True)
 
-        if self.use_local:
-            print("Using local synthetic data...")
-            self.dataset = self._load_local_synthetic_data()
-        else:
-            try:
-                self.dataset = load_dataset(
-                    "allenai/DS_Critique_Bank",
-                    cache_dir=self.cache_dir
-                )
-            except Exception as e:
-                print(f"Could not load DS_Critique_Bank from HF: {e}")
-                print("Using local synthetic data instead...")
-                self.dataset = self._load_local_synthetic_data()
+    def download_file(self, filename: str) -> str:
+        local_path = os.path.join(self.cache_dir, filename)
+        if os.path.exists(local_path):
+            return local_path
+        if hf_hub_download is None:
+            raise ImportError("huggingface_hub required. Install with: pip install huggingface_hub")
+        print(f"  Downloading {filename}...")
+        return hf_hub_download(repo_id=REPO_ID, filename=filename, repo_type="dataset", local_dir=self.cache_dir)
 
-        return self.dataset
+    def load_jsonl(self, filepath: str) -> List[Dict]:
+        data = []
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        data.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        return data
 
-    def _load_local_synthetic_data(self) -> DatasetDict:
-        """Load synthetic DS-style data from our create_dataset.py output"""
-        from datasets import load_from_disk
+    @staticmethod
+    def get_critique_score(instance: Dict, prefer_human: bool = True) -> Optional[float]:
+        if prefer_human and "explanation_annotations" in instance:
+            annotations = instance["explanation_annotations"]
+            if annotations and len(annotations) > 0:
+                human_scores = []
+                for ann in annotations:
+                    if isinstance(ann, dict) and "explanation_score" in ann:
+                        s = ann["explanation_score"]
+                        if s is not None:
+                            human_scores.append(float(s))
+                if human_scores:
+                    return sum(human_scores) / len(human_scores)
 
-        try:
-            # Load from our created dataset
-            # full_dataset = load_from_disk('data/processed/comprehensive_ranking_dataset')
-            full_dataset = load_from_disk(self.data_dir)
+        if "critiques" in instance and instance["critiques"]:
+            critique_scores = []
+            for critique in instance["critiques"]:
+                if isinstance(critique, dict):
+                    elems = critique.get("critique_elements", {})
+                    if isinstance(elems, dict) and "explanation_score" in elems:
+                        s = elems["explanation_score"]
+                        if s is not None:
+                            critique_scores.append(float(s))
+            if critique_scores:
+                return sum(critique_scores) / len(critique_scores)
+        return None
 
-            # Filter only DS critique examples
-            train_ds = full_dataset['train'].filter(lambda x: x['source'] == 'ds-critique')
-            val_ds = full_dataset['validation'].filter(lambda x: x['source'] == 'ds-critique')
-            test_ds = full_dataset['test'].filter(lambda x: x['source'] == 'ds-critique') if 'test' in full_dataset else train_ds.select(range(min(100, len(train_ds))))
+    @staticmethod
+    def get_query_text(instance: Dict) -> str:
+        question = instance.get("question", "")
+        gold_answer = instance.get("gold_answer", "")
+        return f"Question: {question} Correct answer: {gold_answer}"
 
-            # Convert to DS format - need to keep only essential columns
-            def convert_format(example):
-                return {
-                    'query_id': example['query_id'],
-                    'question': example['premise'],
-                    'explanation': example['candidate'],
-                    'score': example['quality_score'] + 1,  # Convert 0-4 to 1-5
-                    'critique': f"Quality level: {example['quality_score']}"
-                }
+    @staticmethod
+    def get_explanation_text(instance: Dict) -> str:
+        return instance.get("student_explanation", "").strip()
 
-            train_converted = train_ds.map(convert_format, remove_columns=train_ds.column_names)
-            val_converted = val_ds.map(convert_format, remove_columns=val_ds.column_names)
-            test_converted = test_ds.map(convert_format, remove_columns=test_ds.column_names)
+    def group_by_question(self, instances: List[Dict]) -> Dict[str, List[Dict]]:
+        groups = defaultdict(list)
+        for inst in instances:
+            qid = inst.get("qid", inst.get("id", "unknown"))
+            groups[qid].append(inst)
+        return dict(groups)
 
-            return DatasetDict({
-                'train': train_converted,
-                'validation': val_converted,
-                'test': test_converted
-            })
-        except Exception as e:
-            print(f"Error loading local data: {e}")
-            raise
+    def convert_group_to_ranking(self, qid: str, instances: List[Dict]) -> Optional[Dict]:
+        candidates = []
+        scores = []
+        student_models = []
 
-    def convert_to_ranking_format(self,
-                                 split: str = 'train',
-                                 include_critiques: bool = False) -> List[Dict]:
-        """
-        Convert DS format to ranking training format
+        for inst in instances:
+            explanation = self.get_explanation_text(inst)
+            score = self.get_critique_score(inst, prefer_human=(self.score_source != "critique_model"))
+            if explanation and score is not None:
+                candidates.append(explanation)
+                scores.append(score)
+                student_models.append(inst.get("student_model", "unknown"))
 
-        Returns list of examples with format:
-        {
-            'query': instruction-style query,
-            'explanations': list of explanations,
-            'scores': list of quality scores (1-5),
-            'critiques': list of critiques (optional)
-        }
-        """
-        if self.dataset is None:
-            self.load_dataset()
-
-        data = self.dataset[split]
-        ranking_examples = []
-
-        # Group by unique query_id (not question text!)
-        query_groups = {}
-
-        for example in tqdm(data, desc=f"Processing {split} split"):
-            # Handle both DS format and our format
-            query_id = example.get('query_id', example.get('qid', ''))
-            question = example.get('question', example.get('premise', ''))
-            explanation = example.get('explanation', example.get('candidate', ''))
-
-            # Get score - check if it's already converted or raw quality_score
-            score = example.get('score', None)
-            if score is None:
-                # Raw quality_score from 0-4, convert to 1-5
-                quality_score = example.get('quality_score', 0)
-                score = quality_score + 1
-            # If score exists, it's already 1-5 from convert_format, use as-is
-
-            # If no query_id, fall back to grouping by question text
-            if not query_id:
-                query_id = question
-
-            if query_id not in query_groups:
-                query_groups[query_id] = {
-                    'question': question,
-                    'explanations': [],
-                    'scores': [],
-                    'critiques': []
-                }
-
-            # Add explanation and score
-            query_groups[query_id]['explanations'].append(explanation)
-            query_groups[query_id]['scores'].append(score)
-
-            if include_critiques:
-                critique = example.get('critique', f"Quality: {score}")
-                query_groups[query_id]['critiques'].append(critique)
-
-        # Convert to ranking format
-        # Split large query groups into smaller ones (max 15 candidates per group)
-        MAX_CANDIDATES_PER_QUERY = 15
-
-        for query_id, group_data in query_groups.items():
-            explanations = group_data['explanations']
-            scores = group_data['scores']
-            critiques = group_data['critiques']
-
-            if len(explanations) < 2:
-                continue
-
-            # If group is large, split into smaller sub-groups
-            if len(explanations) > MAX_CANDIDATES_PER_QUERY:
-                # Split into chunks
-                for i in range(0, len(explanations), MAX_CANDIDATES_PER_QUERY):
-                    chunk_exps = explanations[i:i+MAX_CANDIDATES_PER_QUERY]
-                    chunk_scores = scores[i:i+MAX_CANDIDATES_PER_QUERY]
-
-                    # Only use chunks with score diversity
-                    if len(set(chunk_scores)) > 1:
-                        ranking_example = {
-                            'query': self._format_as_query(group_data['question']),
-                            'explanations': chunk_exps,
-                            'scores': chunk_scores,
-                            'num_candidates': len(chunk_exps)
-                        }
-
-                        if include_critiques:
-                            ranking_example['critiques'] = critiques[i:i+MAX_CANDIDATES_PER_QUERY]
-
-                        ranking_examples.append(ranking_example)
-            else:
-                # Keep small groups as-is
-                ranking_example = {
-                    'query': self._format_as_query(group_data['question']),
-                    'explanations': explanations,
-                    'scores': scores,
-                    'num_candidates': len(explanations)
-                }
-
-                if include_critiques:
-                    ranking_example['critiques'] = critiques
-
-                ranking_examples.append(ranking_example)
-
-        return ranking_examples
-
-    def create_pairwise_comparisons(self, ranking_examples: List[Dict]) -> List[Dict]:
-        """
-        Create pairwise comparisons from ranking data
-        For training with preference-based methods
-        """
-        pairwise_examples = []
-
-        for example in ranking_examples:
-            explanations = example['explanations']
-            scores = example['scores']
-            query = example['query']
-
-            # Create all valid pairs where score_i > score_j
-            for i in range(len(explanations)):
-                for j in range(len(explanations)):
-                    if scores[i] > scores[j]:
-                        pairwise_examples.append({
-                            'query': query,
-                            'chosen': explanations[i],
-                            'rejected': explanations[j],
-                            'chosen_score': scores[i],
-                            'rejected_score': scores[j],
-                            'score_diff': scores[i] - scores[j]
-                        })
-
-        return pairwise_examples
-
-    def create_regression_data(self, ranking_examples: List[Dict]) -> List[Dict]:
-        """
-        Create regression training data where model learns to predict scores
-        """
-        regression_examples = []
-
-        for example in ranking_examples:
-            query = example['query']
-
-            for exp, score in zip(example['explanations'], example['scores']):
-                regression_examples.append({
-                    'query': query,
-                    'explanation': exp,
-                    'score': score,
-                    'normalized_score': (score - 1) / 4.0  # Normalize to [0, 1]
-                })
-
-        return regression_examples
-
-    def _format_as_query(self, question: str) -> str:
-        """Format DS question as instruction-style query"""
-        # DS questions often already include context
-        if "If:" in question and "why" in question.lower():
-            return question
-        elif "?" in question:
-            return f"Question: {question}\nExplain why the answer is correct."
-        else:
-            return f"Explain: {question}"
-
-    def get_statistics(self, split: str = 'train') -> Dict:
-        """Get dataset statistics"""
-        ranking_data = self.convert_to_ranking_format(split)
-
-        all_scores = []
-        num_explanations = []
-
-        for example in ranking_data:
-            all_scores.extend(example['scores'])
-            num_explanations.append(example['num_candidates'])
+        if len(candidates) < self.min_candidates_per_query:
+            return None
+        if len(set(scores)) < 2:
+            return None
 
         return {
-            'num_questions': len(ranking_data),
-            'total_explanations': sum(num_explanations),
-            'avg_explanations_per_question': np.mean(num_explanations),
-            'score_distribution': {
-                score: all_scores.count(score) for score in range(1, 6)
-            },
-            'avg_score': np.mean(all_scores),
-            'std_score': np.std(all_scores)
+            "query_id": f"dscb_{qid}",
+            "query_text": self.get_query_text(instances[0]),
+            "candidates": candidates,
+            "scores": scores,
+            "source": "ds_critique",
+            "num_candidates": len(candidates),
+            "dataset_origin": instances[0].get("dataset", "unknown"),
+            "student_models": student_models,
         }
 
+    def load_ranking_data(self, use_annotated: bool = True, use_non_annotated: bool = True) -> Tuple[List[Dict], List[Dict]]:
+        print("=" * 60)
+        print("Loading DS-Critique Bank for ranking experiments")
+        print("=" * 60)
 
-# Test the loader
+        train_instances = []
+        val_instances = []
+
+        if use_annotated:
+            for split, filename in ANNOTATED_FILES.items():
+                try:
+                    path = self.download_file(filename)
+                    data = self.load_jsonl(path)
+                    print(f"  {filename}: {len(data)} instances (with human annotations)")
+                    if "train" in split:
+                        train_instances.extend(data)
+                    else:
+                        val_instances.extend(data)
+                except Exception as e:
+                    print(f"  WARNING: Failed to load {filename}: {e}")
+
+        if use_non_annotated:
+            for split, filename in NON_ANNOTATED_FILES.items():
+                try:
+                    path = self.download_file(filename)
+                    data = self.load_jsonl(path)
+                    print(f"  {filename}: {len(data)} instances (critique model scores)")
+                    if "train" in split:
+                        train_instances.extend(data)
+                    else:
+                        val_instances.extend(data)
+                except Exception as e:
+                    print(f"  WARNING: Failed to load {filename}: {e}")
+
+        print(f"\nTotal: {len(train_instances)} train, {len(val_instances)} val instances")
+        print("\nGrouping by question...")
+        train_groups = self.group_by_question(train_instances)
+        val_groups = self.group_by_question(val_instances)
+        print(f"  Train: {len(train_groups)} unique questions")
+        print(f"  Val: {len(val_groups)} unique questions")
+
+        print(f"\nConverting to ranking format (min {self.min_candidates_per_query} candidates)...")
+        train_examples = [self.convert_group_to_ranking(qid, group) for qid, group in train_groups.items()]
+        train_examples = [ex for ex in train_examples if ex is not None]
+
+        val_examples = [self.convert_group_to_ranking(qid, group) for qid, group in val_groups.items()]
+        val_examples = [ex for ex in val_examples if ex is not None]
+
+        print(f"\nFinal ranking dataset:")
+        print(f"  Train: {len(train_examples)} ranking groups")
+        print(f"  Val: {len(val_examples)} ranking groups")
+
+        self._print_stats(train_examples, "Train")
+        self._print_stats(val_examples, "Val")
+
+        return train_examples, val_examples
+
+    def _print_stats(self, examples: List[Dict], split: str):
+        if not examples:
+            print(f"  {split}: empty")
+            return
+        n_candidates = [e["num_candidates"] for e in examples]
+        all_scores = [s for e in examples for s in e["scores"]]
+        score_ranges = [max(e["scores"]) - min(e["scores"]) for e in examples]
+        unique_scores_per_query = [len(set(e["scores"])) for e in examples]
+
+        print(f"\n  {split} stats:")
+        print(f"    Candidates/query: {sum(n_candidates)/len(n_candidates):.1f} avg, {min(n_candidates)}-{max(n_candidates)} range")
+        print(f"    Score range: {min(all_scores):.1f}-{max(all_scores):.1f}")
+        print(f"    Mean score range per query: {sum(score_ranges)/len(score_ranges):.2f}")
+        print(f"    Unique scores/query: {sum(unique_scores_per_query)/len(unique_scores_per_query):.2f} avg")
+
+        origins = defaultdict(int)
+        for e in examples:
+            origins[e["dataset_origin"]] += 1
+        print(f"    Source datasets: {dict(origins)}")
+
+
+def load_ds_critique_ranking(cache_dir: str = "data/ds_critique_bank", min_candidates: int = 3, seed: int = 42):
+    loader = DSCritiqueBankLoader(cache_dir=cache_dir, min_candidates_per_query=min_candidates, seed=seed)
+    return loader.load_ranking_data()
+
+
 if __name__ == "__main__":
-    print("Testing DS Critique Bank Loader...")
+    import argparse
+    parser = argparse.ArgumentParser(description="Load DS-Critique Bank")
+    parser.add_argument("--cache_dir", default="data/ds_critique_bank")
+    parser.add_argument("--min_candidates", type=int, default=3)
+    parser.add_argument("--show_examples", type=int, default=2)
+    args = parser.parse_args()
 
-    loader = DSCritiqueBankLoader()
-
-    # Load dataset
-    dataset = loader.load_dataset()
-    print(f"\nDataset loaded with splits: {list(dataset.keys())}")
-
-    # Get statistics
-    for split in ['train', 'validation', 'test']:
-        if split in dataset:
-            stats = loader.get_statistics(split)
-            print(f"\n{split.upper()} Statistics:")
-            print(f"  Questions: {stats['num_questions']}")
-            print(f"  Total explanations: {stats['total_explanations']}")
-            print(f"  Avg per question: {stats['avg_explanations_per_question']:.2f}")
-            print(f"  Score distribution: {stats['score_distribution']}")
-
-    # Test ranking format conversion
-    print("\n\nTesting ranking format conversion...")
-    ranking_data = loader.convert_to_ranking_format('train')
-    print(f"Created {len(ranking_data)} ranking examples")
-
-    if ranking_data:
-        print(f"\nSample ranking example:")
-        sample = ranking_data[0]
-        print(f"  Query: {sample['query'][:100]}...")
-        print(f"  Num candidates: {sample['num_candidates']}")
-        print(f"  Scores: {sample['scores']}")
-
-    # Test pairwise comparisons
-    print("\n\nTesting pairwise comparison creation...")
-    pairwise = loader.create_pairwise_comparisons(ranking_data[:10])
-    print(f"Created {len(pairwise)} pairwise comparisons from 10 ranking examples")
-
-    if pairwise:
-        print(f"\nSample pairwise comparison:")
-        sample = pairwise[0]
-        print(f"  Query: {sample['query'][:80]}...")
-        print(f"  Chosen (score {sample['chosen_score']}): {sample['chosen'][:80]}...")
-        print(f"  Rejected (score {sample['rejected_score']}): {sample['rejected'][:80]}...")
-
-    print("\nDS Critique Bank Loader test complete!")
+    train, val = load_ds_critique_ranking(cache_dir=args.cache_dir, min_candidates=args.min_candidates)
+    print(f"\n{'='*60}\nExample ranking groups:\n{'='*60}")
+    for i, ex in enumerate(val[:args.show_examples]):
+        print(f"\n--- Example {i+1} ---")
+        print(f"Query: {ex['query_text'][:100]}...")
+        print(f"Student models: {ex['student_models']}")
+        print(f"Scores: {ex['scores']}")
