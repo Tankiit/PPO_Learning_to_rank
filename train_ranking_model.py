@@ -167,10 +167,14 @@ def train_ranking_reward_model(args):
     elif args.dataset == 'ds_critique':
         from datasets import load_from_disk, DatasetDict
 
-        data_dir = 'data/processed/comprehensive_ranking_dataset'
-        # Try workspace-relative path first, then parent directory
+        # Use path relative to this script so it works on any machine
+        _script_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.join(_script_dir, 'data', 'processed', 'comprehensive_ranking_dataset')
         if not os.path.exists(data_dir):
-            data_dir = '/Users/tanmoy/research/PPO_learning_to_rank/PPO_Learning_to_rank/data/processed/comprehensive_ranking_dataset'
+            raise FileNotFoundError(
+                f"Dataset not found at {data_dir}. "
+                "Create it by running create_dataset.py or place the processed dataset there."
+            )
         full_dataset = load_from_disk(data_dir)
 
         train_ds = full_dataset['train'].filter(lambda x: x['source'] == 'ds-critique')

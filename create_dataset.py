@@ -641,6 +641,19 @@ class ComprehensiveDatasetBuilder:
 # ----------------------------- CLI EXAMPLE -----------------------------
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Build comprehensive ranking dataset.")
+    parser.add_argument(
+        "--sources", nargs="+",
+        default=["e-snli", "delta-nli", "winowhy", "ds-critique"],
+        help="Sources to include (e.g. --sources ds-critique for ds_critique only)",
+    )
+    parser.add_argument(
+        "--output_dir", "-o", type=str, default=None,
+        help="Output base dir (default: <script_dir>/data)",
+    )
+    args = parser.parse_args()
+
     config = {
         "generation_model": "meta-llama/Llama-3.1-8B-Instruct",
         "max_samples_per_source": 10000,
@@ -661,9 +674,13 @@ def main():
     }
     builder = ComprehensiveDatasetBuilder(config)
 
-    out_dir = "data"  # <— top-level data folder
+    out_dir = args.output_dir
+    if out_dir is None:
+        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    print(f"Output dir: {out_dir}")
+    print(f"Sources: {args.sources}")
     dataset = builder.create_comprehensive_dataset(
-        sources=["e-snli", "delta-nli", "winowhy", "ds-critique"],
+        sources=args.sources,
         output_dir=out_dir
     )
 
