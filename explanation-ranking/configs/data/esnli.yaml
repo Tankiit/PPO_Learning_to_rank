@@ -1,0 +1,8 @@
+# @package data
+name: esnli
+data_dir: ${oc.env:EXPLRANK_DATA_DIR,./data}/raw/e-snli/normalized
+use_local: true
+min_candidates: 2
+max_length: 256
+normalize_scores: true
+score_scale: 5.0

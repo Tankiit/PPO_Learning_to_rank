@@ -1,0 +1,13 @@
+# @package data
+name: combined
+sources:
+  - esnli
+  - ds_critique
+esnli:
+  data_dir: ${oc.env:EXPLRANK_DATA_DIR,./data}/raw/e-snli/normalized
+ds_critique:
+  cache_dir: ${oc.env:EXPLRANK_DATA_DIR,./data}/ds_critique_bank
+min_candidates: 2
+normalize_scores: true
+score_scale: 5.0
+max_length: 256

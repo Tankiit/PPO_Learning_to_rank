@@ -1,0 +1,9 @@
+# @package data
+name: ds_critique
+cache_dir: ${oc.env:EXPLRANK_DATA_DIR,./data}/ds_critique_bank
+min_candidates_per_query: 3
+use_human_scores: true
+score_source: best_available
+normalize_scores: true
+score_scale: 5.0
+max_length: 256

@@ -1,0 +1,13 @@
+defaults:
+  - data: ds_critique
+  - model: deberta_v3
+  - loss: listnet
+  - experiment: loss_comparison
+  - _self_
+
+hydra:
+  run:
+    dir: ${output_dir}
+  sweep:
+    dir: ${oc.env:EXPLRANK_OUTPUT_DIR,./outputs}/multirun/${now:%Y-%m-%d}/${experiment_name}
+    subdir: ${loss.name}_s${seed}

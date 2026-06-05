@@ -1,0 +1,23 @@
+# @package _global_
+defaults:
+  - /data: ds_critique
+  - /model: deberta_v3
+  - /loss: listnet
+  - _self_
+
+experiment_name: loss_comparison
+output_dir: ${oc.env:EXPLRANK_OUTPUT_DIR,./outputs}/${experiment_name}/${loss.name}_s${seed}
+
+# Sweep: mse | listnet | ranknet | approxndcg × seeds 42, 123, 456
+losses: [mse, listnet, ranknet, approxndcg]
+seeds: [42, 123, 456]
+
+seed: 42
+batch_size: 8
+learning_rate: 2.0e-5
+num_epochs: 10
+early_stopping_metric: separation_ratio_std
+early_stopping_patience: 3
+eval_every: 1
+use_wandb: false
+wandb_project: explrank

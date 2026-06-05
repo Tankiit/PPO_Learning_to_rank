@@ -1,0 +1,22 @@
+# @package _global_
+defaults:
+  - /data: ds_critique
+  - /model: deberta_v3
+  - /loss: listnet
+  - _self_
+
+experiment_name: step_prm
+output_dir: ${oc.env:EXPLRANK_OUTPUT_DIR,./outputs}/${experiment_name}_s${seed}
+
+seed: 42
+batch_size: 4
+learning_rate: 2.0e-5
+num_epochs: 8
+lambda_rank: 1.0
+lambda_step: 0.5
+silver_strategy: freeprm
+step_loss_weight: 0.5
+max_steps: 5
+early_stopping_metric: separation_ratio_std
+early_stopping_patience: 3
+use_wandb: false
