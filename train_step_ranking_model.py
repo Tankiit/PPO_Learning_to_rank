@@ -39,9 +39,25 @@ Usage
       --silver_strategy llm_judge \
       --silver_labels_path data/step_labels_esnli.jsonl \
       ...
+
+DS Critique Bank (Extension 1 adapter, same file)
+-----------------------------------------------
+Bridges ``DSCritiqueBankLoader`` → step-level items for this trainer.
+
+The loader (``ds_critique_loader.py``) downloads, groups by qid, scores
+candidates, and returns dicts with query_id, query_text, candidates, scores.
+
+This module adds step parsing, silver strategies (freeprm / mainflaw /
+llm_judge), and ``build_step_datasets()`` for ``--dataset ds_critique``.
+
+Raw JSONL is re-read for ``mainflaw`` because ``convert_group_to_ranking()``
+drops ``critiques[gpt-4].critique_elements.main_flaw``.
+
+  python train_step_ranking_model.py --dataset ds_critique \\
+      --silver_strategy mainflaw --encoder microsoft/deberta-v3-base
 """
 
-import os, re, json, math, logging, argparse
+import os, re, json, math, logging, argparse, random
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -58,6 +74,8 @@ from transformers import (
 from datasets import load_dataset, load_from_disk
 import numpy as np
 from tqdm import tqdm
+
+from ds_critique_loader import load_ds_critique_ranking
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -307,6 +325,321 @@ def collate_by_query(batch: List[Dict]) -> Dict[str, List]:
         grouped[item["query_id"]].append(item)
 
     return {"queries": list(grouped.values())}
+
+
+# ---------------------------------------------------------------------------
+# 3b. DS CRITIQUE BANK — STEP ADAPTER (was ds_critique_step_adapter.py)
+# ---------------------------------------------------------------------------
+
+NUMBERED_STEP_RE = re.compile(r"^\s*\d+\)\s*(.+)$", re.MULTILINE)
+
+
+def parse_steps_ds_critique(explanation: str) -> List[str]:
+    """
+    DS-Critique has two explanation formats:
+
+    QA_reasoning_step1 → numbered:
+        "1) The Moon orbits the Earth.\\n2) The Sun is much farther..."
+    QA_explanation1 / QA_zeroshot1 → prose paragraph → sentence-split.
+    """
+    if not explanation or not explanation.strip():
+        return [""]
+
+    matches = NUMBERED_STEP_RE.findall(explanation.strip())
+    if len(matches) >= 2:
+        return [m.strip() for m in matches]
+
+    return split_into_steps(explanation)
+
+
+def freeprm_labels(n_steps: int, score: float, threshold: float = 3.0) -> List[int]:
+    """All steps get the explanation-level label."""
+    label = 1 if score >= threshold else 0
+    return [label] * n_steps
+
+
+def mainflaw_labels(
+    steps: List[str],
+    main_flaw: Optional[str],
+    score: float,
+    threshold: float = 3.0,
+) -> List[int]:
+    """
+    Label=0 on the step matching gpt-4 main_flaw; other steps 1.
+    Falls back to FreePRM when main_flaw is missing or unmatched.
+    """
+    if not main_flaw or main_flaw.strip().lower() in ("none", ""):
+        return freeprm_labels(len(steps), score, threshold)
+
+    if score <= 1.0:
+        return [0] * len(steps)
+
+    flaw_clean = main_flaw.strip().strip('"').strip("'").lower()
+    flaw_words = set(flaw_clean.split())
+
+    best_idx, best_score = None, 0.0
+    for i, step in enumerate(steps):
+        step_lower = step.lower()
+        if flaw_clean[:40] and flaw_clean[:40] in step_lower:
+            labels = [1] * len(steps)
+            labels[i] = 0
+            return labels
+        if flaw_words:
+            step_words = set(step_lower.split())
+            overlap = len(flaw_words & step_words) / len(flaw_words)
+            if overlap > best_score:
+                best_score = overlap
+                best_idx = i
+
+    if best_score > 0.4 and best_idx is not None:
+        labels = [1] * len(steps)
+        labels[best_idx] = 0
+        return labels
+
+    return freeprm_labels(len(steps), score, threshold)
+
+
+class RawJSONLIndex:
+    """Map (qid, explanation[:50]) → raw JSONL record for main_flaw lookup."""
+
+    def __init__(self, jsonl_paths: List[str]):
+        self._idx: Dict[Tuple[str, str], Dict] = {}
+        for path in jsonl_paths:
+            self._load(path)
+        logger.info(f"RawJSONLIndex: {len(self._idx)} records indexed")
+
+    def _load(self, path: str):
+        if not os.path.exists(path):
+            logger.warning(f"RawJSONLIndex: file not found: {path}")
+            return
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                qid = rec.get("qid", rec.get("id", ""))
+                expl = rec.get("student_explanation", "").strip()
+                key = (qid, expl[:50])
+                self._idx[key] = rec
+
+    def get(self, qid: str, explanation: str) -> Optional[Dict]:
+        raw_qid = qid.replace("dscb_", "")
+        return self._idx.get((raw_qid, explanation[:50]))
+
+
+class DSCritiqueStepDataset(Dataset):
+    """``load_ds_critique_ranking()`` groups + step tokens + silver labels."""
+
+    def __init__(
+        self,
+        groups: List[Dict],
+        tokenizer: AutoTokenizer,
+        silver_strategy: str = "freeprm",
+        raw_index: Optional[RawJSONLIndex] = None,
+        llm_labels_path: Optional[str] = None,
+        quality_threshold: float = 3.0,
+        max_length: int = 256,
+    ):
+        self.silver_strategy = silver_strategy
+        self.quality_threshold = quality_threshold
+        self._llm_labels: Dict[Tuple[str, int, int], int] = {}
+        if silver_strategy == "llm_judge" and llm_labels_path:
+            self._load_llm_labels(llm_labels_path)
+
+        self.items = []
+        skipped_truncated = 0
+
+        for group in groups:
+            qid = group["query_id"]
+            query_text = group["query_text"]
+            candidates = group["candidates"]
+            scores = group["scores"]
+
+            for cand_idx, (explanation, score) in enumerate(zip(candidates, scores)):
+                steps = parse_steps_ds_critique(explanation)
+                encoded = build_step_input(
+                    premise=query_text,
+                    hypothesis="",
+                    explanation=explanation,
+                    tokenizer=tokenizer,
+                    max_length=max_length,
+                )
+                step_positions = encoded["step_positions"]
+                if len(step_positions) == 0:
+                    skipped_truncated += 1
+                    step_positions = [0]
+
+                step_labels = self._get_step_labels(
+                    qid=qid,
+                    cand_idx=cand_idx,
+                    steps=steps,
+                    score=score,
+                    explanation=explanation,
+                    raw_index=raw_index,
+                    n_positions=len(step_positions),
+                )
+
+                self.items.append({
+                    "input_ids": encoded["input_ids"],
+                    "attention_mask": encoded["attention_mask"],
+                    "step_positions": step_positions,
+                    "quality_score": float(score),
+                    "step_labels": step_labels,
+                    "query_id": qid,
+                })
+
+        logger.info(
+            f"DSCritiqueStepDataset: {len(self.items)} items "
+            f"({skipped_truncated} had truncated step tokens)"
+        )
+
+    def _get_step_labels(
+        self,
+        qid: str,
+        cand_idx: int,
+        steps: List[str],
+        score: float,
+        explanation: str,
+        raw_index: Optional[RawJSONLIndex],
+        n_positions: int,
+    ) -> List[int]:
+        if self.silver_strategy == "freeprm":
+            labels = freeprm_labels(n_positions, score, self.quality_threshold)
+
+        elif self.silver_strategy == "mainflaw":
+            main_flaw = None
+            if raw_index is not None:
+                rec = raw_index.get(qid, explanation)
+                if rec is not None:
+                    for c in rec.get("critiques", []):
+                        if c.get("critique_model") == "gpt-4-0613":
+                            main_flaw = c.get("critique_elements", {}).get("main_flaw")
+                            break
+            labels_full = mainflaw_labels(
+                steps, main_flaw, score, self.quality_threshold
+            )
+            labels = self._align(labels_full, n_positions)
+
+        elif self.silver_strategy == "llm_judge":
+            labels = []
+            for i in range(n_positions):
+                key = (qid, cand_idx, i)
+                if key in self._llm_labels:
+                    labels.append(self._llm_labels[key])
+                else:
+                    labels.append(
+                        1 if score >= self.quality_threshold else 0
+                    )
+        else:
+            raise ValueError(f"Unknown silver_strategy: {self.silver_strategy}")
+
+        return labels
+
+    @staticmethod
+    def _align(labels: List[int], n: int) -> List[int]:
+        if len(labels) >= n:
+            return labels[:n]
+        return labels + [labels[-1]] * (n - len(labels))
+
+    def _load_llm_labels(self, path: str):
+        if not os.path.exists(path):
+            logger.warning(f"LLM labels file not found: {path}")
+            return
+        with open(path) as f:
+            for line in f:
+                rec = json.loads(line)
+                key = (rec["qid"], rec["cand_idx"], rec["step_idx"])
+                self._llm_labels[key] = int(rec["label"])
+        logger.info(f"Loaded {len(self._llm_labels)} LLM step labels")
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, idx):
+        return self.items[idx]
+
+
+def build_step_datasets(
+    cache_dir: str = "data/ds_critique_bank",
+    encoder_name: str = "microsoft/deberta-v3-base",
+    silver_strategy: str = "freeprm",
+    raw_jsonl_paths: Optional[List[str]] = None,
+    llm_labels_path: Optional[str] = None,
+    min_candidates: int = 3,
+    quality_threshold: float = 3.0,
+    max_length: int = 256,
+    seed: int = 42,
+) -> Tuple[DSCritiqueStepDataset, DSCritiqueStepDataset, AutoTokenizer]:
+    train_groups, val_groups = load_ds_critique_ranking(
+        cache_dir=cache_dir,
+        min_candidates=min_candidates,
+        seed=seed,
+    )
+
+    if len(val_groups) > len(train_groups):
+        logger.warning(
+            f"Val ({len(val_groups)}) > Train ({len(train_groups)}) — "
+            "likely missing DSCB-train-non-anno.jsonl. "
+            "Merging all groups and re-splitting 90/10."
+        )
+        all_groups = train_groups + val_groups
+        random.seed(seed)
+        random.shuffle(all_groups)
+        cut = int(0.9 * len(all_groups))
+        train_groups, val_groups = all_groups[:cut], all_groups[cut:]
+        logger.info(
+            f"Re-split → train: {len(train_groups)} | val: {len(val_groups)}"
+        )
+
+    raw_index = None
+    if silver_strategy == "mainflaw":
+        if raw_jsonl_paths:
+            raw_index = RawJSONLIndex(raw_jsonl_paths)
+        else:
+            discovered = [
+                os.path.join(cache_dir, f)
+                for f in os.listdir(cache_dir)
+                if f.endswith(".jsonl")
+            ]
+            if discovered:
+                logger.info(
+                    f"Auto-discovered {len(discovered)} JSONL files for raw index"
+                )
+                raw_index = RawJSONLIndex(discovered)
+            else:
+                logger.warning(
+                    "silver_strategy='mainflaw' but no raw JSONL found. "
+                    "Falling back to FreePRM for all records."
+                )
+
+    tokenizer = AutoTokenizer.from_pretrained(encoder_name)
+    tokenizer.add_tokens([STEP_TOKEN])
+    logger.info(f"[STEP] token id: {tokenizer.convert_tokens_to_ids(STEP_TOKEN)}")
+
+    train_ds = DSCritiqueStepDataset(
+        groups=train_groups,
+        tokenizer=tokenizer,
+        silver_strategy=silver_strategy,
+        raw_index=raw_index,
+        llm_labels_path=llm_labels_path,
+        quality_threshold=quality_threshold,
+        max_length=max_length,
+    )
+    val_ds = DSCritiqueStepDataset(
+        groups=val_groups,
+        tokenizer=tokenizer,
+        silver_strategy=silver_strategy,
+        raw_index=raw_index,
+        llm_labels_path=llm_labels_path,
+        quality_threshold=quality_threshold,
+        max_length=max_length,
+    )
+
+    return train_ds, val_ds, tokenizer
 
 
 # ---------------------------------------------------------------------------
@@ -705,11 +1038,20 @@ def parse_args():
     p.add_argument("--encoder",            default="microsoft/deberta-v3-base")
     p.add_argument("--dataset",            default="esnli",
                    choices=["esnli", "ds_critique", "combined"])
-    p.add_argument("--data_dir",           default="data/processed/comprehensive_ranking_dataset")
+    p.add_argument("--data_dir",           default="data/processed/comprehensive_ranking_dataset",
+                   help="Path for esnli/combined (load_from_disk). Ignored for ds_critique.")
+    p.add_argument("--ds_critique_cache",  default="data/ds_critique_bank",
+                   help="Cache dir for DS-Critique Bank (only used when --dataset ds_critique)")
+    p.add_argument(
+        "--raw_jsonl_paths",
+        nargs="*",
+        default=None,
+        help="Optional JSONL paths for mainflaw (omit = auto-discover under cache dir)",
+    )
     p.add_argument("--loss_function",      default="listnet",
                    choices=["listnet", "ranknet", "lambdarank", "approxndcg"])
     p.add_argument("--silver_strategy",    default="freeprm",
-                   choices=["freeprm", "llm_judge"])
+                   choices=["freeprm", "llm_judge", "mainflaw"])
     p.add_argument("--silver_labels_path", default=None,
                    help="Path to JSONL with LLM step labels (only for llm_judge)")
     p.add_argument("--step_loss_weight",   type=float, default=0.5)
@@ -731,35 +1073,58 @@ def main():
     args = parse_args()
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    random.seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device}")
 
-    # ── Tokenizer + add STEP token ──────────────────────────────────────────
-    tokenizer = AutoTokenizer.from_pretrained(args.encoder)
-    tokenizer.add_tokens([STEP_TOKEN])
+    # ── Data + tokenizer ────────────────────────────────────────────────────
+    if args.dataset == "ds_critique":
+        if args.silver_strategy == "llm_judge":
+            assert args.silver_labels_path, (
+                "--silver_labels_path required for llm_judge on ds_critique"
+            )
+        logger.info(f"Loading DS-Critique Bank from {args.ds_critique_cache}")
+        raw_paths = args.raw_jsonl_paths if args.raw_jsonl_paths else None
+        train_ds, val_ds, tokenizer = build_step_datasets(
+            cache_dir=args.ds_critique_cache,
+            encoder_name=args.encoder,
+            silver_strategy=args.silver_strategy,
+            raw_jsonl_paths=raw_paths,
+            llm_labels_path=args.silver_labels_path
+            if args.silver_strategy == "llm_judge"
+            else None,
+            min_candidates=3,
+            quality_threshold=args.quality_threshold,
+            max_length=args.max_length,
+            seed=args.seed,
+        )
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.encoder)
+        tokenizer.add_tokens([STEP_TOKEN])
+        silver_gen = SilverLabelGenerator(
+            strategy=args.silver_strategy
+            if args.silver_strategy != "mainflaw"
+            else "freeprm",
+            quality_threshold=args.quality_threshold,
+        )
+        if args.silver_strategy == "llm_judge":
+            assert args.silver_labels_path, "--silver_labels_path required for llm_judge"
+            silver_gen.load_llm_labels(args.silver_labels_path)
+
+        logger.info(f"Loading dataset from {args.data_dir}")
+        raw = load_from_disk(args.data_dir)
+        train_data = list(raw["train"])
+        val_data = list(raw["validation"])
+        train_ds = StepRankingDataset(
+            train_data, tokenizer, silver_gen, args.max_length
+        )
+        val_ds = StepRankingDataset(
+            val_data, tokenizer, silver_gen, args.max_length
+        )
+
     step_token_id = tokenizer.convert_tokens_to_ids(STEP_TOKEN)
     logger.info(f"[STEP] token id: {step_token_id}")
-
-    # ── Silver label generator ───────────────────────────────────────────────
-    silver_gen = SilverLabelGenerator(
-        strategy=args.silver_strategy,
-        quality_threshold=args.quality_threshold,
-    )
-    if args.silver_strategy == "llm_judge":
-        assert args.silver_labels_path, "--silver_labels_path required for llm_judge"
-        silver_gen.load_llm_labels(args.silver_labels_path)
-
-    # ── Load data ────────────────────────────────────────────────────────────
-    logger.info(f"Loading dataset from {args.data_dir}")
-    raw = load_from_disk(args.data_dir)
-
-    # Convert HuggingFace dataset splits to list[dict]
-    train_data = list(raw["train"])
-    val_data   = list(raw["validation"])
-
-    train_ds = StepRankingDataset(train_data, tokenizer, silver_gen, args.max_length)
-    val_ds   = StepRankingDataset(val_data,   tokenizer, silver_gen, args.max_length)
 
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True,
