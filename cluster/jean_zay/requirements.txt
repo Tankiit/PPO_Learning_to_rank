@@ -1,0 +1,10 @@
+# Overlay installed on top of Jean-Zay's pytorch-gpu/py3/2.4.0 module.
+# Torch itself is intentionally supplied by the IDRIS module.
+transformers==4.51.3
+peft==0.15.2
+accelerate==1.6.0
+bitsandbytes==0.45.5
+datasets==3.2.0
+huggingface-hub==0.30.2
+sentencepiece==0.2.1
+protobuf==5.29.5

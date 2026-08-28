@@ -1,0 +1,60 @@
+data:
+  output_dir: data/arr
+  esnli_source: null
+  esnli_train_groups: 10000
+  ds_main_source: data/ds_critique_bank/DSCB-train-crowd-anno.jsonl
+  ds_dev_source: data/ds_critique_bank/DSCB-dev-crowd-anno.jsonl
+
+prompted:
+  model: mistralai/Mistral-7B-Instruct-v0.3
+  revision: c170c708c41dac9275d15a8fff4eca08d52bab71
+  local_files_only: false
+  prompt_mode: direct
+  dtype: bfloat16
+  batch_size: 4
+  max_input_length: 2048
+  esnli_group_count: 2000
+  pilot_min_coverage: 0.99
+
+judge_training:
+  base_model: mistralai/Mistral-7B-Instruct-v0.3
+  revision: c170c708c41dac9275d15a8fff4eca08d52bab71
+  local_files_only: false
+  architecture: decoder
+  qlora: true
+  dtype: bfloat16
+  max_length: 512
+  epochs: 3
+  group_batch_size: 2
+  eval_batch_size: 8
+  gradient_accumulation_steps: 8
+  learning_rate: 0.00002
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+  max_grad_norm: 1.0
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  loss: mse
+  seed: 42
+
+epistemic:
+  method: credence_head_disagreement
+  head_count: 5
+  hidden_dim: 256
+  dropout_min: 0.05
+  dropout_max: 0.30
+  variance_estimator: population_ddof_0
+  central_score: head_mean
+  credal_interval: head_min_max
+
+evaluation:
+  batch_size: 16
+  max_length: 512
+  local_files_only: false
+
+statistics:
+  bootstrap_samples: 10000
+  confidence: 0.95
+  multiple_testing: holm
+  separation_hypothesis: 0.8
