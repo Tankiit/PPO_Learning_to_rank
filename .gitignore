@@ -18,9 +18,17 @@ experiments/**/visualizations/
 
 # Claude files
 .claude/
+# Ignore Markdown files in any case
 *.md
+**/*.md
 *.MD
+*.Md
+*.mD
 claude.MD
+
+# Ignore modal Python files anywhere in the repo
+modal_*.py
+**/modal_*.py
 
 # Python
 __pycache__/
@@ -102,3 +110,25 @@ backup_*/
 
 # Evaluation results
 evaluation_results/
+
+# Patches and local working notes (kept on disk, never committed)
+patches/
+*.patch
+*.diff
+*.rej
+*.orig
+
+# Docs / readmes (*.md is already ignored above; these cover the plain-text ones)
+docs/
+README
+README.txt
+readme.txt
+NOTES.txt
+notes.txt
+
+# Core Python packages must remain versioned despite the broad data/model
+# artifact rules above.
+!src/models/
+!src/models/**/*.py
+!src/data/
+!src/data/**/*.py
