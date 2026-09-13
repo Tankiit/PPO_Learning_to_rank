@@ -1,6 +1,5 @@
 # ARR Epistemic Ranking Report
 
-_Regenerated 2026-09-03 by `scripts/build_report.py` from `runs/tier1/tier1_results.json`, `runs/tier1/reversal_diagnosis.json` and the saved Modal predictions. Every number below is computed from a saved artifact; none is transcribed by hand._
 
 ## Status
 
