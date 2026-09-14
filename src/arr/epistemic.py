@@ -62,24 +62,131 @@ class _ScalarMLPHead(nn.Module):
 
 
 class DiverseScalarHead(nn.Module):
-    """CREDENCE-style ensemble of scalar heads over shared hidden states."""
+    """Ensemble of scalar heads over shared hidden states.
+
+    Note on naming: this is not CREDENCE's construction. CREDENCE varies LoRA
+    rank across {4, 8, 16, 32, 64}, which changes each head's hypothesis space
+    so the heads do not share an optimum. Here the hypothesis space is
+    identical across heads and only the regularisation strength differs, so
+    head diversity has to be induced by the objective (see
+    ``decorrelation_penalty``) or by stochastic inference (``mc_dropout``).
+    """
 
     def __init__(
         self,
         input_dim: int,
         hidden_dim: int,
         dropout_rates: Sequence[float],
+        mc_dropout: int = 0,
+        feature_keep_fraction: float = 1.0,
+        feature_seed: int = 0,
     ) -> None:
         super().__init__()
         if not dropout_rates:
             raise ValueError("at least one dropout rate is required")
+        if mc_dropout < 0:
+            raise ValueError("mc_dropout must be non-negative")
+        if not 0.0 < feature_keep_fraction <= 1.0:
+            raise ValueError("feature_keep_fraction must lie in (0, 1]")
         self.heads = nn.ModuleList(
             _ScalarMLPHead(input_dim, hidden_dim, float(dropout))
             for dropout in dropout_rates
         )
+        # 0 preserves the existing deterministic behaviour exactly.
+        self.mc_dropout = int(mc_dropout)
+        self.feature_keep_fraction = float(feature_keep_fraction)
+        generator = torch.Generator().manual_seed(int(feature_seed))
+        if feature_keep_fraction == 1.0:
+            masks = torch.ones((len(dropout_rates), input_dim))
+        else:
+            masks = (
+                torch.rand((len(dropout_rates), input_dim), generator=generator)
+                < feature_keep_fraction
+            ).float()
+            # Never create a member with an empty hypothesis space.
+            for member in range(masks.shape[0]):
+                if not masks[member].any():
+                    masks[member, member % input_dim] = 1.0
+            masks /= feature_keep_fraction
+        self.register_buffer("feature_masks", masks, persistent=True)
+
+    def _member_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return torch.cat(
+            [
+                head(hidden_states * self.feature_masks[index].to(hidden_states.dtype))
+                for index, head in enumerate(self.heads)
+            ],
+            dim=-1,
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return torch.cat([head(hidden_states) for head in self.heads], dim=-1)
+        if self.mc_dropout > 0 and not self.training:
+            # Stochastic passes over the heads only; the backbone stays in
+            # eval(). Without this the sole diversity mechanism is switched
+            # off at exactly the moment credal width is read.
+            previous = [head.dropout.training for head in self.heads]
+            for head in self.heads:
+                head.dropout.train()
+            try:
+                samples = [
+                    self._member_logits(hidden_states)
+                    for _ in range(self.mc_dropout)
+                ]
+            finally:
+                for head, was_training in zip(self.heads, previous):
+                    head.dropout.train(was_training)
+            # The credal set is over (head, sample) pairs, which is the honest
+            # reading of what MC dropout provides.
+            return torch.cat(samples, dim=-1)
+        return self._member_logits(hidden_states)
+
+
+def decorrelation_penalty(
+    scores: "torch.Tensor", targets: "torch.Tensor", mask: "torch.Tensor"
+) -> "torch.Tensor":
+    """Push head residuals apart so the heads do not share a single optimum.
+
+    ``scores`` is [batch, candidates, heads]; ``targets`` and ``mask`` are
+    [batch, candidates]. Residual r_h = s_h - y. The penalty is the squared
+    off-diagonal Gram of the centred residuals: heads that make the same
+    errors are redundant, heads that make different errors span a wider credal
+    set.
+
+    Without this term every head minimises the same loss against the same
+    targets from the same hidden state, so they converge together and the
+    credal width decays with training rather than tracking data coverage.
+    Dropout rate alone does not fix that -- it perturbs the optimisation path,
+    not the optimum.
+
+    This is negative correlation learning, and it is the ensemble form of the
+    orthogonality condition in the SLVM separation result.
+    """
+
+    if scores.ndim != 3:
+        raise ValueError(f"expected [batch, candidates, heads] scores, found {tuple(scores.shape)}")
+    selected = mask.bool().unsqueeze(-1).expand_as(scores)
+    residual = (scores - targets.unsqueeze(-1))[selected].view(-1, scores.shape[-1])
+    if residual.shape[0] < 2:
+        return scores.new_zeros(())
+    residual = residual - residual.mean(dim=0, keepdim=True)
+    gram = (residual.T @ residual) / residual.shape[0]
+    off_diagonal = gram - torch.diag_embed(torch.diagonal(gram))
+    head_count = scores.shape[-1]
+    return off_diagonal.pow(2).sum() / max(head_count * (head_count - 1), 1)
+
+
+def credal_summary(scores: "torch.Tensor") -> dict[str, "torch.Tensor"]:
+    """Credal read-out over the head dimension of a [..., heads] tensor."""
+
+    lower = scores.min(dim=-1).values
+    upper = scores.max(dim=-1).values
+    return {
+        "mean": scores.mean(dim=-1),
+        "lower": lower,
+        "upper": upper,
+        "width": upper - lower,
+        "variance": scores.var(dim=-1, unbiased=False),
+    }
 
 
 def build_diverse_scalar_head(
@@ -88,9 +195,19 @@ def build_diverse_scalar_head(
     hidden_dim: int = 256,
     dropout_min: float = 0.05,
     dropout_max: float = 0.30,
+    mc_dropout: int = 0,
+    feature_keep_fraction: float = 1.0,
+    feature_seed: int = 0,
 ) -> tuple[DiverseScalarHead, list[float]]:
     rates = credence_dropout_rates(head_count, dropout_min, dropout_max)
-    return DiverseScalarHead(input_dim, hidden_dim, rates), rates
+    return DiverseScalarHead(
+        input_dim,
+        hidden_dim,
+        rates,
+        mc_dropout=mc_dropout,
+        feature_keep_fraction=feature_keep_fraction,
+        feature_seed=feature_seed,
+    ), rates
 
 
 def summarize_head_scores(head_scores: Sequence[float]) -> dict[str, Any]:
@@ -147,6 +264,121 @@ def make_epistemic_record(
         inference_ms=inference_ms,
         metadata=metadata,
     )
+
+
+def combine_independent_member_records(
+    member_records: Sequence[Sequence[ScoreRecord]],
+    *,
+    model_name: str = "independent-backbone-ensemble",
+    model_revision: str = "independent-members",
+) -> list[ScoreRecord]:
+    """Combine aligned scalar predictions from independently trained models.
+
+    Each input sequence is one complete ensemble member. Alignment is checked
+    by identifiers rather than file order so independently produced artifacts
+    cannot silently attach a member score to the wrong candidate.
+    """
+
+    if len(member_records) < 2:
+        raise ValueError("an independent ensemble requires at least two members")
+    indexed: list[dict[tuple[str, str], ScoreRecord]] = []
+    for member_index, records in enumerate(member_records):
+        by_key: dict[tuple[str, str], ScoreRecord] = {}
+        for record in records:
+            key = (record.group_id, record.candidate_id)
+            if key in by_key:
+                raise ValueError(f"duplicate member {member_index} prediction for {key}")
+            if record.score is None or not math.isfinite(float(record.score)):
+                raise ValueError(f"invalid member {member_index} score for {key}")
+            by_key[key] = record
+        indexed.append(by_key)
+    reference_keys = set(indexed[0])
+    for member_index, by_key in enumerate(indexed[1:], start=1):
+        if set(by_key) != reference_keys:
+            missing = sorted(reference_keys - set(by_key))[:3]
+            extra = sorted(set(by_key) - reference_keys)[:3]
+            raise ValueError(
+                f"member {member_index} prediction keys differ; missing={missing}, extra={extra}"
+            )
+
+    output: list[ScoreRecord] = []
+    for reference in member_records[0]:
+        key = (reference.group_id, reference.candidate_id)
+        aligned = [by_key[key] for by_key in indexed]
+        if any(row.data_fingerprint != reference.data_fingerprint for row in aligned):
+            raise ValueError(f"member fingerprint mismatch for {key}")
+        scores = [float(row.score) for row in aligned]
+        summary = summarize_head_scores(scores)
+        output.append(
+            ScoreRecord(
+                group_id=reference.group_id,
+                candidate_id=reference.candidate_id,
+                model_name=model_name,
+                model_revision=model_revision,
+                prompt_hash=reference.prompt_hash,
+                data_fingerprint=reference.data_fingerprint,
+                score=float(summary["score_mean"]),
+                raw_output=json.dumps(summary, sort_keys=True, separators=(",", ":")),
+                parsing_status="ok",
+                seed=reference.seed,
+                inference_ms=sum(float(row.inference_ms or 0.0) for row in aligned),
+                metadata={
+                    **summary,
+                    "method": "independent_backbone_ensemble",
+                    "head_count": len(scores),
+                    "bounded_by": "sigmoid",
+                    "member_models": [row.model_name for row in aligned],
+                    "member_seeds": [row.seed for row in aligned],
+                },
+            )
+        )
+    return output
+
+
+def center_listwise_member_logits(records: Sequence[ScoreRecord]) -> list[ScoreRecord]:
+    """Fix ListNet's additive-logit gauge before comparing ensemble members.
+
+    ListNet identifies rankings but not the absolute offset of a group's
+    logits. Independently trained models can therefore represent the same
+    ranking near opposite sigmoid endpoints, creating an arbitrary width near
+    one. This transform converts scores back to logits, centres each member
+    within each ranking group, and returns bounded scores. It preserves the
+    member's ordering exactly while making cross-member levels comparable.
+    """
+
+    grouped: dict[str, list[ScoreRecord]] = {}
+    for record in records:
+        if record.score is None or not math.isfinite(float(record.score)):
+            raise ValueError(
+                f"invalid scalar score for {record.group_id}/{record.candidate_id}"
+            )
+        grouped.setdefault(record.group_id, []).append(record)
+    output_by_key: dict[tuple[str, str], ScoreRecord] = {}
+    epsilon = 1e-7
+    for group_id, group_records in grouped.items():
+        probabilities = np.clip(
+            np.asarray([float(record.score) for record in group_records]),
+            epsilon,
+            1.0 - epsilon,
+        )
+        logits = np.log(probabilities) - np.log1p(-probabilities)
+        centred = logits - float(np.mean(logits))
+        aligned = 1.0 / (1.0 + np.exp(-centred))
+        for record, score in zip(group_records, aligned):
+            value = float(score)
+            output_by_key[(record.group_id, record.candidate_id)] = ScoreRecord(
+                **{
+                    **record.to_dict(),
+                    "score": value,
+                    "raw_output": f"{value:.10f}",
+                    "metadata": {
+                        **record.metadata,
+                        "listwise_logit_gauge": "within_group_mean_zero",
+                        "pre_alignment_score": float(record.score),
+                    },
+                }
+            )
+    return [output_by_key[(record.group_id, record.candidate_id)] for record in records]
 
 
 def _record_head_scores(record: ScoreRecord, expected_count: int | None = None) -> list[float]:
@@ -348,6 +580,7 @@ class EpistemicScalarJudge(Judge):
         device_map: str | dict[str, Any] = "auto",
         dtype: str | None = None,
         local_files_only: bool = False,
+        mc_dropout: int | None = None,
     ) -> None:
         self.checkpoint = Path(checkpoint)
         self.seed = seed
@@ -356,6 +589,7 @@ class EpistemicScalarJudge(Judge):
         self.device_map = device_map
         self.dtype = dtype
         self.local_files_only = local_files_only
+        self.mc_dropout = mc_dropout
         self._model: Any = None
         self._tokenizer: Any = None
         self.model_name = str(self.checkpoint)
@@ -366,10 +600,9 @@ class EpistemicScalarJudge(Judge):
         if self._model is not None:
             return
         try:
-            from peft import PeftModel
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
         except ImportError as exc:
-            raise RuntimeError("transformers and peft are required for epistemic scoring") from exc
+            raise RuntimeError("transformers is required for epistemic scoring") from exc
 
         manifest_path = self.checkpoint / "arr_model_manifest.json"
         if not manifest_path.exists():
@@ -401,6 +634,13 @@ class EpistemicScalarJudge(Judge):
             hidden_dim,
             dropout_min,
             dropout_max,
+            int(
+                self.mc_dropout
+                if self.mc_dropout is not None
+                else manifest.get("epistemic_mc_dropout", 0)
+            ),
+            float(manifest.get("epistemic_feature_keep_fraction", 1.0)),
+            int(manifest.get("epistemic_feature_seed", 0)),
         )
         saved_rates = [float(value) for value in manifest.get("epistemic_dropout_rates", [])]
         if saved_rates and not np.allclose(saved_rates, expected_rates, rtol=0.0, atol=1e-12):
@@ -409,7 +649,20 @@ class EpistemicScalarJudge(Judge):
         base.score = diverse_head
         base.config.num_labels = self.head_count
         base.config.pad_token_id = self._tokenizer.pad_token_id
-        self._model = PeftModel.from_pretrained(base, str(self.checkpoint))
+        if (self.checkpoint / "adapter_config.json").exists():
+            try:
+                from peft import PeftModel
+            except ImportError as exc:
+                raise RuntimeError("peft is required to load this adapter checkpoint") from exc
+            self._model = PeftModel.from_pretrained(base, str(self.checkpoint))
+        else:
+            from safetensors.torch import load_file
+
+            shard = self.checkpoint / "model.safetensors"
+            if not shard.exists():
+                raise FileNotFoundError(f"no model weights found in {self.checkpoint}")
+            base.load_state_dict(load_file(str(shard)), strict=False)
+            self._model = base
         self._model.config.pad_token_id = self._tokenizer.pad_token_id
         if hasattr(self._model, "get_base_model"):
             self._model.get_base_model().config.pad_token_id = self._tokenizer.pad_token_id
@@ -441,9 +694,10 @@ class EpistemicScalarJudge(Judge):
             started = time.perf_counter()
             with torch.inference_mode():
                 logits = self._model(**encoded).logits
-                if logits.ndim != 2 or logits.shape[1] != self.head_count:
+                expected_count = self.head_count * max(int(self.mc_dropout or 0), 1)
+                if logits.ndim != 2 or logits.shape[1] != expected_count:
                     raise RuntimeError(
-                        f"expected [batch, {self.head_count}] logits, found {tuple(logits.shape)}"
+                        f"expected [batch, {expected_count}] logits, found {tuple(logits.shape)}"
                     )
                 scores = torch.sigmoid(logits.float()).cpu().tolist()
             if device.type == "cuda":

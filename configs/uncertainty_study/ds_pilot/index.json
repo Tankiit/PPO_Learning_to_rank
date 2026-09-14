@@ -1,0 +1,17 @@
+[
+  {
+    "id": "0000-core-encoder-listnet-f0-s42-full",
+    "stage": "core",
+    "config": "configs/uncertainty_study/ds_pilot/0000-core-encoder-listnet-f0-s42-full.json"
+  },
+  {
+    "id": "0001-core-encoder-listmle-f0-s42-full",
+    "stage": "core",
+    "config": "configs/uncertainty_study/ds_pilot/0001-core-encoder-listmle-f0-s42-full.json"
+  },
+  {
+    "id": "0002-core-encoder-mse-f0-s42-full",
+    "stage": "core",
+    "config": "configs/uncertainty_study/ds_pilot/0002-core-encoder-mse-f0-s42-full.json"
+  }
+]

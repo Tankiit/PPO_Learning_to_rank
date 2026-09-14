@@ -132,3 +132,8 @@ notes.txt
 !src/models/**/*.py
 !src/data/
 !src/data/**/*.py
+
+# Version only the controlled-study protocol; keep other local notes ignored.
+!docs/
+docs/*
+!docs/controlled_uncertainty_study.md

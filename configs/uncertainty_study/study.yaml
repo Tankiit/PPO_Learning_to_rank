@@ -1,0 +1,40 @@
+# Pilot defaults, to be replaced by equal-budget validation-selected settings.
+seeds: [42, 43, 44]
+endpoint_update_multiplier: 3
+hpo_learning_rates: [0.000005, 0.00002, 0.00008]
+models:
+  deberta:
+    base_model: microsoft/deberta-v3-base
+    architecture: encoder
+    qlora: false
+    dtype: float32
+  mistral:
+    base_model: mistralai/Mistral-7B-Instruct-v0.3
+    architecture: decoder
+    qlora: true
+    dtype: bfloat16
+training:
+  revision: main
+  output_activation: identity
+  device: auto
+  local_files_only: false
+  epistemic_heads: 5
+  scalar_mlp_head: true
+  epistemic_hidden_dim: 256
+  epistemic_dropout_min: 0.05
+  epistemic_dropout_max: 0.30
+  epistemic_mc_dropout: 0
+  epistemic_lambda_div: 0.0
+  temperature: 1.0
+  max_length: 512
+  group_batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 0.00002
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  warmup_ratio: 0.03
+  updates: 300
+  checkpoints: [30, 75, 150, 300]
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05

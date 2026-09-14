@@ -83,6 +83,30 @@ def _dtype(name: str) -> Any:
     return getattr(torch, name)
 
 
+def resolve_training_device(requested: str = "auto") -> Any:
+    """Resolve a portable training device without assuming CUDA/Modal."""
+
+    import torch
+
+    requested = str(requested).lower()
+    if requested == "auto":
+        if torch.cuda.is_available():
+            requested = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            requested = "mps"
+        else:
+            requested = "cpu"
+    if requested == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is not available")
+    if requested == "mps" and not (
+        hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+    ):
+        raise RuntimeError("MPS was requested but is not available to this PyTorch process")
+    if requested not in {"cpu", "cuda", "mps"}:
+        raise ValueError("device must be one of auto, cpu, cuda, or mps")
+    return torch.device(requested)
+
+
 def load_trainable_judge(config: dict[str, Any]) -> tuple[Any, Any, dict[str, Any]]:
     """Create a scalar HF model, optionally with a trainable NF4 QLoRA adapter."""
 
@@ -94,6 +118,7 @@ def load_trainable_judge(config: dict[str, Any]) -> tuple[Any, Any, dict[str, An
     local_files_only = bool(config.get("local_files_only", False))
     resolved_base = resolve_hf_source(base_model, revision, local_files_only)
     architecture = str(config.get("architecture", "decoder"))
+    device = resolve_training_device(str(config.get("device", "auto")))
     qlora = bool(config.get("qlora", architecture == "decoder"))
     resume_from = config.get("resume_from")
     tokenizer_source = str(resume_from or resolved_base)
@@ -105,6 +130,7 @@ def load_trainable_judge(config: dict[str, Any]) -> tuple[Any, Any, dict[str, An
             tokenizer.pad_token = tokenizer.eos_token
 
     epistemic_head_count = int(config.get("epistemic_heads", 1))
+    lambda_div = float(config.get("epistemic_lambda_div", 0.0))
     if epistemic_head_count < 1:
         raise ValueError("epistemic_heads must be positive")
     common: dict[str, Any] = {
@@ -119,8 +145,11 @@ def load_trainable_judge(config: dict[str, Any]) -> tuple[Any, Any, dict[str, An
         common["device_map"] = device_map
     quantization_config = None
     if qlora:
-        if not torch.cuda.is_available():
-            raise RuntimeError("NF4 QLoRA requires a CUDA device")
+        if device.type != "cuda":
+            raise RuntimeError(
+                f"NF4 QLoRA requires CUDA, but the selected device is {device.type}. "
+                "Use a local config with judge_training.qlora=false on MPS/CPU."
+            )
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -136,21 +165,31 @@ def load_trainable_judge(config: dict[str, Any]) -> tuple[Any, Any, dict[str, An
         model.resize_token_embeddings(len(tokenizer))
 
     epistemic_dropout_rates: list[float] | None = None
-    if epistemic_head_count > 1:
-        if architecture != "decoder":
-            raise ValueError("the initial epistemic experiment supports decoder judges only")
+    if epistemic_head_count > 1 or config.get("scalar_mlp_head", False):
+        if architecture != "decoder" and model.config.model_type != "deberta-v2":
+            raise ValueError("shared heads support decoder judges and DeBERTa-v3 encoders")
+        head_input_dim = (
+            int(model.pooler.output_dim) if architecture == "encoder"
+            else int(model.config.hidden_size)
+        )
         diverse_head, epistemic_dropout_rates = build_diverse_scalar_head(
-            int(model.config.hidden_size),
+            head_input_dim,
             epistemic_head_count,
             int(config.get("epistemic_hidden_dim", 256)),
             float(config.get("epistemic_dropout_min", 0.05)),
             float(config.get("epistemic_dropout_max", 0.30)),
+            int(config.get("epistemic_mc_dropout", 0)),
+            float(config.get("epistemic_feature_keep_fraction", 1.0)),
+            int(config.get("epistemic_feature_seed", config.get("seed", 42))),
         )
         diverse_head.to(
             device=next(model.parameters()).device,
             dtype=_dtype(str(config.get("dtype", "bfloat16"))),
         )
-        model.score = diverse_head
+        if architecture == "encoder":
+            model.classifier = diverse_head
+        else:
+            model.score = diverse_head
         model.config.num_labels = epistemic_head_count
 
     if qlora:
@@ -177,14 +216,15 @@ def load_trainable_judge(config: dict[str, Any]) -> tuple[Any, Any, dict[str, An
                 modules_to_save=list(config.get("modules_to_save", ["score"])),
             )
             model = get_peft_model(model, lora)
-    elif torch.cuda.is_available() and device_map is None:
-        model = model.cuda()
+    elif device_map is None:
+        model = model.to(device)
 
     metadata = {
         "base_model": base_model,
         "model_revision": revision,
         "resolved_model_source": resolved_base,
         "dtype": str(config.get("dtype", "bfloat16")),
+        "device": str(device),
         "architecture": architecture,
         "qlora": qlora,
         "quantization": "NF4" if qlora else None,
@@ -192,6 +232,17 @@ def load_trainable_judge(config: dict[str, Any]) -> tuple[Any, Any, dict[str, An
             "credence_head_disagreement" if epistemic_head_count > 1 else None
         ),
         "epistemic_head_count": epistemic_head_count,
+        "epistemic_lambda_div": lambda_div,
+        "epistemic_mc_dropout": int(config.get("epistemic_mc_dropout", 0)),
+        "epistemic_bootstrap_members": bool(
+            config.get("epistemic_bootstrap_members", False)
+        ),
+        "epistemic_feature_keep_fraction": float(
+            config.get("epistemic_feature_keep_fraction", 1.0)
+        ),
+        "epistemic_feature_seed": int(
+            config.get("epistemic_feature_seed", config.get("seed", 42))
+        ),
         "epistemic_hidden_dim": int(config.get("epistemic_hidden_dim", 256)),
         "epistemic_dropout_min": float(config.get("epistemic_dropout_min", 0.05)),
         "epistemic_dropout_max": float(config.get("epistemic_dropout_max", 0.30)),
@@ -205,7 +256,12 @@ def load_trainable_judge(config: dict[str, Any]) -> tuple[Any, Any, dict[str, An
     return model, tokenizer, metadata
 
 
-def _forward_ranking_batch(model: Any, batch: dict[str, Any], device: Any) -> tuple[Any, Any, Any]:
+def _forward_ranking_batch(
+    model: Any,
+    batch: dict[str, Any],
+    device: Any,
+    apply_sigmoid: bool = True,
+) -> tuple[Any, Any, Any]:
     import torch
 
     encoded = {key: value.to(device) for key, value in batch["encoded"].items()}
@@ -216,14 +272,14 @@ def _forward_ranking_batch(model: Any, batch: dict[str, Any], device: Any) -> tu
     logits = model(**encoded).logits
     if logits.ndim != 2:
         raise RuntimeError(f"expected rank-2 scalar-head logits, found {tuple(logits.shape)}")
-    bounded = torch.sigmoid(logits.float())
-    if bounded.shape[-1] == 1:
-        bounded = bounded.squeeze(-1)
+    values = torch.sigmoid(logits.float()) if apply_sigmoid else logits.float()
+    if values.shape[-1] == 1:
+        values = values.squeeze(-1)
         score_shape = targets.shape
     else:
-        score_shape = (*targets.shape, bounded.shape[-1])
-    scores = bounded.new_zeros(score_shape)
-    scores = scores.index_put((group_indices, candidate_indices), bounded)
+        score_shape = (*targets.shape, values.shape[-1])
+    scores = values.new_zeros(score_shape)
+    scores = scores.index_put((group_indices, candidate_indices), values)
     return scores, targets, mask
 
 
@@ -232,20 +288,97 @@ def _multihead_ranking_loss(
     scores: Any,
     targets: Any,
     mask: Any,
+    lambda_div: float = 0.0,
+    member_weights: Any | None = None,
 ) -> Any:
-    """Apply the selected ranking objective independently to every head."""
+    """Apply the selected ranking objective independently to every head.
+
+    ``lambda_div`` adds a decorrelation term over head residuals. At 0.0 this
+    function is numerically identical to the previous implementation, which is
+    what makes the change safe to land: run at 0.0 first and confirm the loss
+    curve matches an existing run before sweeping it.
+    """
 
     import torch
 
+    from .epistemic import decorrelation_penalty
+
     if scores.ndim == 2:
-        return loss_function(scores, targets, mask)
+        if member_weights is None:
+            return loss_function(scores, targets, mask)
+        weights = member_weights.to(device=scores.device, dtype=scores.dtype)
+        if tuple(weights.shape) not in {
+            (scores.shape[0],),
+            (scores.shape[0], 1),
+        }:
+            raise ValueError(
+                "single-member weights must be [batch] or [batch, 1], "
+                f"found {tuple(weights.shape)}"
+            )
+        weights = weights.reshape(-1)
+        per_group = torch.stack(
+            [
+                loss_function(
+                    scores[row : row + 1],
+                    targets[row : row + 1],
+                    mask[row : row + 1],
+                )
+                for row in range(scores.shape[0])
+            ]
+        )
+        return (per_group * weights).mean()
     if scores.ndim != 3 or scores.shape[:2] != targets.shape:
         raise ValueError(
             f"expected [batch, candidates, heads] scores, found {tuple(scores.shape)}"
         )
-    return torch.stack(
-        [loss_function(scores[..., head], targets, mask) for head in range(scores.shape[-1])]
-    ).mean()
+    if member_weights is None:
+        ranking = torch.stack(
+            [loss_function(scores[..., head], targets, mask) for head in range(scores.shape[-1])]
+        ).mean()
+    else:
+        weights = member_weights.to(device=scores.device, dtype=scores.dtype)
+        if tuple(weights.shape) != (scores.shape[0], scores.shape[-1]):
+            raise ValueError(
+                f"member_weights must be [batch, heads], found {tuple(weights.shape)}"
+            )
+        member_losses = []
+        for head in range(scores.shape[-1]):
+            per_group = torch.stack(
+                [
+                    loss_function(
+                        scores[row : row + 1, ..., head],
+                        targets[row : row + 1],
+                        mask[row : row + 1],
+                    )
+                    for row in range(scores.shape[0])
+                ]
+            )
+            # Bootstrap multiplicities define the member's empirical measure.
+            # Divide by the original batch size, not the nonzero count: over a
+            # complete epoch this is exactly sum_g count[g] L_g / N.
+            member_losses.append((per_group * weights[:, head]).mean())
+        ranking = torch.stack(member_losses).mean()
+    if lambda_div <= 0.0:
+        return ranking
+    return ranking + lambda_div * decorrelation_penalty(scores, targets, mask)
+
+
+def bootstrap_member_counts(
+    groups: Sequence[RankingGroup], head_count: int, seed: int, epoch: int
+) -> dict[str, list[int]]:
+    """Exact group-level bootstrap multiplicities for each ensemble member."""
+
+    if not groups:
+        raise ValueError("cannot bootstrap an empty group collection")
+    rng = np.random.default_rng(np.random.SeedSequence([seed, epoch, head_count]))
+    counts = np.zeros((len(groups), head_count), dtype=np.int64)
+    for head in range(head_count):
+        sampled = rng.integers(0, len(groups), size=len(groups))
+        counts[:, head] = np.bincount(sampled, minlength=len(groups))
+    return {
+        group.group_id: counts[index].tolist()
+        for index, group in enumerate(groups)
+    }
 
 
 def predict_groups(
@@ -332,7 +465,7 @@ def train_judge(
     import torch
     from torch.optim import AdamW
     from torch.utils.data import DataLoader
-    from transformers import get_linear_schedule_with_warmup
+    from transformers import get_scheduler
 
     output = Path(run_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -342,8 +475,14 @@ def train_judge(
     loss_function = get_loss(loss_name)
     model, tokenizer, model_metadata = load_trainable_judge(config)
     architecture = model_metadata["architecture"]
+    # Read from the manifest the loader already validated, so the value the
+    # objective uses is the value the checkpoint records.
+    lambda_div = float(model_metadata["epistemic_lambda_div"])
+    bootstrap_members = bool(model_metadata["epistemic_bootstrap_members"])
+    epistemic_head_count = int(model_metadata["epistemic_head_count"])
     requested_epochs = int(config.get("epochs", 3 if architecture == "decoder" else 10))
-    maximum_epochs = 3 if architecture == "decoder" else 10
+    default_maximum = 5 if architecture == "decoder" else 10
+    maximum_epochs = int(config.get("max_epochs", default_maximum))
     if requested_epochs > maximum_epochs:
         raise ValueError(f"{architecture} judge is capped at {maximum_epochs} epochs")
     batch_size = int(config.get("group_batch_size", 2 if architecture == "decoder" else 8))
@@ -365,9 +504,12 @@ def train_judge(
     )
     updates_per_epoch = math.ceil(len(loader) / accumulation)
     total_updates = max(1, updates_per_epoch * requested_epochs)
-    scheduler = get_linear_schedule_with_warmup(
+    scheduler_name = str(config.get("scheduler", "linear"))
+    warmup_steps = int(float(config.get("warmup_ratio", 0.03)) * total_updates)
+    scheduler = get_scheduler(
+        scheduler_name,
         optimizer,
-        num_warmup_steps=int(float(config.get("warmup_ratio", 0.03)) * total_updates),
+        num_warmup_steps=warmup_steps,
         num_training_steps=total_updates,
     )
 
@@ -397,6 +539,10 @@ def train_judge(
         "started_at_unix": time.time(),
         "seed": seed,
         "loss": loss_name,
+        "learning_rate": float(config.get("learning_rate", 2e-5)),
+        "scheduler": scheduler_name,
+        "warmup_steps": warmup_steps,
+        "total_optimizer_updates": total_updates,
         "train_fingerprint": train_groups[0].data_fingerprint if train_groups else None,
         "validation_fingerprint": validation_groups[0].data_fingerprint if validation_groups else None,
         **model_metadata,
@@ -407,9 +553,37 @@ def train_judge(
             model.train()
             optimizer.zero_grad(set_to_none=True)
             epoch_losses: list[float] = []
+            bootstrap_counts = (
+                bootstrap_member_counts(
+                    train_groups, epistemic_head_count, seed, epoch
+                )
+                if bootstrap_members
+                else None
+            )
             for step, batch in enumerate(loader):
-                scores, targets, mask = _forward_ranking_batch(model, batch, device)
-                loss = _multihead_ranking_loss(loss_function, scores, targets, mask) / accumulation
+                # Pointwise MSE uses bounded scores. Ranking objectives operate
+                # on raw logits; sigmoid before ListNet/RankNet destroys score
+                # scale and can saturate every member at an endpoint.
+                scores, targets, mask = _forward_ranking_batch(
+                    model,
+                    batch,
+                    device,
+                    apply_sigmoid=loss_name == "mse",
+                )
+                member_weights = None
+                if bootstrap_counts is not None:
+                    member_weights = torch.tensor(
+                        [bootstrap_counts[group.group_id] for group in batch["groups"]],
+                        dtype=torch.float32,
+                    )
+                loss = _multihead_ranking_loss(
+                    loss_function,
+                    scores,
+                    targets,
+                    mask,
+                    lambda_div,
+                    member_weights,
+                ) / accumulation
                 if not torch.isfinite(loss):
                     raise FloatingPointError(f"non-finite {loss_name} loss at epoch {epoch}, step {step}")
                 loss.backward()

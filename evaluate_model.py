@@ -3,7 +3,10 @@
 import numpy as np
 import torch
 from typing import Dict, List, Tuple, Optional
-import evaluate
+try:
+    import evaluate
+except ImportError:  # Generation metrics are optional for ranking-only tests.
+    evaluate = None
 from sklearn.metrics import ndcg_score
 from scipy.stats import kendalltau, spearmanr
 import json
@@ -38,6 +41,10 @@ class ComprehensiveEvaluator:
     def load_metrics(self):
         """Load evaluation metrics"""
         self.metrics = {}
+
+        if evaluate is None:
+            print("Warning: optional 'evaluate' package is unavailable; generation metrics disabled")
+            return
 
         # Generation metrics
         try:

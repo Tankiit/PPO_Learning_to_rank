@@ -90,7 +90,10 @@ def load_esnli_source(source: str | Path | None = None) -> dict[str, Any]:
     if cached is not None:
         return {split: Dataset.from_file(str(path)) for split, path in cached.items()}
     try:
-        return dict(load_dataset("esnli", "plain_text"))
+        # The official e-SNLI repository uses a dataset loading script rather
+        # than static parquet metadata. Datasets>=3 requires this trust choice
+        # to be explicit instead of prompting (which fails in batch jobs).
+        return dict(load_dataset("esnli", "plain_text", trust_remote_code=True))
     except Exception as exc:
         raise RuntimeError(
             "official e-SNLI is neither supplied nor cached; provide --source or allow a HF download"

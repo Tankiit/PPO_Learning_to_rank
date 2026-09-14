@@ -1,0 +1,91 @@
+# Perturbation controls for the epistemic-uncertainty claims.
+#
+# Each control is an intervention with a direction predicted in advance. A
+# result in the predicted direction supports the claim; a result against it is
+# reported as a failure of the estimator, not explained away. The predictions
+# below are pre-committed and are checked mechanically by
+# scripts/analyze_perturbations.py, which prints PASS or FAIL per prediction.
+#
+# Evaluation is always the fixed qid held-out set (54 questions, 12 explanations
+# each). It is identical at every noise level and every training fraction, so
+# coverage changes without the evaluation moving underneath it.
+
+arms: [independent_listnet, shared_listnet]
+model: EleutherAI/pythia-70m
+evaluation: data/arr/ds_critique_qidsplit_dev.jsonl
+seeds: [42, 123, 777]
+
+# ---------------------------------------------------------------------------
+# Control 1 - gauge injection. Exact invariance, zero cost, already implemented.
+# ---------------------------------------------------------------------------
+gauge_test:
+  where: tests/arr/test_gauge_invariance.py
+  tolerance: 1.0e-9        # not 0.0: a float64 sigmoid/logit round trip cannot
+                           # be bit-identical. Observed worst deviation 1.8e-15.
+  status: implemented
+  findings:
+    listwise_statistics: invariant
+    raw_credal_width: moves, as it must
+    scalar_score_and_ndcg: gauge-dependent by construction (mean of sigmoids);
+                           unchanged on the real predictions, where members
+                           already sit at a common representative
+
+# ---------------------------------------------------------------------------
+# Control 2 - aleatoric perturbation. "Add noise and nothing should change."
+# ---------------------------------------------------------------------------
+aleatoric:
+  target_noise_sigma: [0.0, 0.05, 0.1, 0.2]
+  noise_seed: shared_across_members
+  # THE TRAP, closed structurally rather than by convention: the noise is baked
+  # into a single perturbed training FILE per (sigma, seed), and all five
+  # members read that same file. A per-member draw would inject disagreement -
+  # synthetic epistemic uncertainty - and the control would pass for the wrong
+  # reason. Because members cannot see different targets, the only remaining
+  # source of member disagreement is initialisation.
+  noise_model: additive_gaussian_clipped_to_unit_interval
+  predictions:
+    consensus_entropy: increases
+    js_to_consensus: flat
+    pr_deviation: flat
+    pr_residual: decreases
+  preconditions:
+    # Ordering is preserved in expectation because the noise is unbiased, but
+    # the realised within-group pair-flip rate is recorded per sigma and read
+    # as a caveat. At sigma 0.2 roughly 14% of pairs flip, which is a partial
+    # change of the target concept and not purely aleatoric; results at that
+    # level are reported with that stated.
+    max_advisory_pair_flip_rate: 0.05
+
+# ---------------------------------------------------------------------------
+# Control 3 - epistemic perturbation. Dose-response in data coverage.
+# ---------------------------------------------------------------------------
+epistemic:
+  train_qid_fraction: [0.25, 0.5, 1.0]
+  # Nested subsets: the 25% questions are a subset of the 50%, which are a
+  # subset of the full set, so the curve varies coverage and nothing else.
+  # Selection is a stable hash of the qid, independent of the training seed.
+  subset_rule: nested_stable_hash_of_qid
+  predictions:
+    js_to_consensus: decreases
+    ndcg_heldout: increases
+  shared_listnet_prediction:
+    js_to_consensus: collapses at every fraction, no dose-response
+  # Pre-committed negative outcome: if independent backbones also show flat JS
+  # across fractions, the epistemic reading of width fails for the one arm that
+  # passed the other gates, and the paper's positive residue reduces to the
+  # C1-C3 dissociation alone.
+  on_flat_js_for_independent: report_C3_failure_and_shrink_section_8
+
+# Input perturbation (paraphrase at evaluation) is deliberately excluded: the
+# direction is not pre-committable for meaning-preserving edits, so it cannot
+# act as a gate.
+excluded:
+  input_perturbation: direction_not_pre_committable
+
+budget:
+  # sigma=0 and fraction=1.0 are the Tier 2 qid runs and are reused, not repaid.
+  new_cells: 5
+  runs_per_cell: 18          # (5 independent members + 1 shared arm) x 3 seeds
+  new_runs: 90
+  measured_minutes_per_run: {full: 20, half: 10, quarter: 5}
+  estimated_gpu_hours: 25

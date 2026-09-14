@@ -1,0 +1,82 @@
+# Epistemic diagnostics + PPO arms for explanation-quality ranking.
+# Inherits the judge/evaluation settings from compression.yaml; only the
+# epistemic and ppo sections differ.
+
+data:
+  output_dir: data/arr
+  ds_main_source: data/arr/DSCB-train-crowd-anno.jsonl
+  ds_dev_source: data/arr/DSCB-dev-crowd-anno.jsonl
+  train_data: data/arr/ds_critique_external_test.jsonl
+  validation_data: data/arr/ds_critique_external_dev.jsonl
+  # Retained as provenance/alternate sources. They are not silently mixed
+  # into crowd-supervised targets.
+  ds_dev_non_annotated_source: data/arr/DSCB-dev-non-anno.jsonl
+  ds_train_expert_source: data/arr/DSCB-train-expert.jsonl
+
+judge_training:
+  base_model: mistralai/Mistral-7B-Instruct-v0.3
+  revision: c170c708c41dac9275d15a8fff4eca08d52bab71
+  local_files_only: false
+  device: auto
+  architecture: decoder
+  qlora: true
+  dtype: bfloat16
+  max_length: 512
+  epochs: 5
+  max_epochs: 5
+  group_batch_size: 1
+  eval_batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 0.00002
+  scheduler: linear
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+  max_grad_norm: 1.0
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  loss: mse
+  seed: 42
+
+epistemic:
+  method: credence_head_disagreement
+  head_count: 5
+  hidden_dim: 256
+  dropout_min: 0.05
+  dropout_max: 0.30
+  variance_estimator: population_ddof_0
+  central_score: head_mean
+  credal_interval: head_min_max
+  # Decorrelation weight on head residuals. 0.0 reproduces the previous
+  # objective exactly -- run that first and match the loss curve against an
+  # existing run before sweeping {0.01, 0.1, 1.0}.
+  lambda_div: 0.0
+  # Stochastic passes per head at inference. 0 keeps deterministic scoring.
+  # Non-zero is MC dropout and must be described as such.
+  mc_dropout: 0
+  bootstrap_members: false
+  feature_keep_fraction: 1.0
+  feature_seed: 42
+
+ppo:
+  policy_model: mistralai/Mistral-7B-Instruct-v0.3
+  learning_rate: 0.0000141
+  batch_size: 64
+  mini_batch_size: 16
+  ppo_epochs: 4
+  # Keep FIXED across the none/var/credal arms. The penalty shrinks reward
+  # magnitude, so an adaptive controller silently changes the effective
+  # constraint and the comparison stops meaning anything.
+  kl_coef: 0.2
+  max_new_tokens: 128
+  lam: 1.0
+
+evaluation:
+  batch_size: 16
+  max_length: 512
+  local_files_only: false
+
+statistics:
+  bootstrap_samples: 10000
+  confidence: 0.95
+  multiple_testing: holm

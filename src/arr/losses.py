@@ -134,7 +134,31 @@ def lambdarank_loss(
     return torch.stack(group_losses).mean()
 
 
+def listmle_loss(
+    scores: Tensor, targets: Tensor, mask: Tensor,
+    generator: torch.Generator | None = None,
+) -> Tensor:
+    """Plackett–Luce NLL; uniformly random order within exact target ties.
+
+    Shuffle before stable sorting, so candidate storage order never breaks ties.
+    A supplied generator must match the score device. Query losses are averaged.
+    """
+    scores, targets, mask = _validate(scores, targets, mask)
+    losses = []
+    for s, y, m in zip(scores, targets, mask):
+        s, y = s[m], y[m]
+        shuffle = torch.randperm(len(s), device=s.device, generator=generator)
+        order = shuffle[torch.argsort(y[shuffle], descending=True, stable=True)]
+        ordered = s[order]
+        # Center first for stable cancellation under large common offsets.
+        ordered = ordered - ordered.max()
+        denominators = torch.logcumsumexp(ordered.flip(0), dim=0).flip(0)
+        losses.append((denominators - ordered).sum())
+    return torch.stack(losses).mean()
+
+
 LOSSES: dict[str, Callable[[Tensor, Tensor, Tensor], Tensor]] = {
+    "listmle": listmle_loss,
     "mse": masked_mse,
     "listnet": listnet_loss,
     "ranknet": ranknet_loss,

@@ -8,6 +8,7 @@ does not import the PPO or human-evaluation pipeline.
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 from typing import Any, Sequence
@@ -212,11 +213,39 @@ def _train_epistemic_judge(args: argparse.Namespace) -> int:
             "architecture": "decoder",
             "loss": args.loss or training.get("loss", "mse"),
             "seed": args.seed,
+            "device": args.device or training.get("device", "auto"),
+            "epochs": args.epochs if args.epochs is not None else training.get("epochs", 3),
+            "group_batch_size": (
+                args.batch_size
+                if args.batch_size is not None
+                else training.get("group_batch_size", 2)
+            ),
             "resume_from": str(args.resume_from) if args.resume_from else None,
             "epistemic_heads": int(args.head_count or epistemic.get("head_count", 5)),
             "epistemic_hidden_dim": int(epistemic.get("hidden_dim", 256)),
             "epistemic_dropout_min": float(epistemic.get("dropout_min", 0.05)),
             "epistemic_dropout_max": float(epistemic.get("dropout_max", 0.30)),
+            "epistemic_lambda_div": float(
+                args.lambda_div
+                if args.lambda_div is not None
+                else epistemic.get("lambda_div", 0.0)
+            ),
+            "epistemic_mc_dropout": int(
+                args.mc_dropout
+                if args.mc_dropout is not None
+                else epistemic.get("mc_dropout", 0)
+            ),
+            "epistemic_bootstrap_members": bool(
+                args.bootstrap_members or epistemic.get("bootstrap_members", False)
+            ),
+            "epistemic_feature_keep_fraction": float(
+                args.feature_keep_fraction
+                if args.feature_keep_fraction is not None
+                else epistemic.get("feature_keep_fraction", 1.0)
+            ),
+            "epistemic_feature_seed": int(
+                epistemic.get("feature_seed", args.seed)
+            ),
         }
     )
     if not training.get("base_model"):
@@ -227,9 +256,15 @@ def _train_epistemic_judge(args: argparse.Namespace) -> int:
     config["judge_training"] = training
     config["epistemic"] = epistemic
     save_resolved_config(config, args.output_dir)
+    train_groups = load_groups(args.train_data)
+    validation_groups = load_groups(args.validation_data)
+    if args.max_train_groups is not None:
+        train_groups = train_groups[: args.max_train_groups]
+    if args.max_validation_groups is not None:
+        validation_groups = validation_groups[: args.max_validation_groups]
     train_judge(
-        load_groups(args.train_data),
-        load_groups(args.validation_data),
+        train_groups,
+        validation_groups,
         training,
         args.output_dir,
     )
@@ -303,6 +338,72 @@ def _evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _diagnose_epistemic(args: argparse.Namespace) -> int:
+    """Gate the epistemic work: is credal width a signal or an artefact?"""
+
+    from .epistemic_diagnostics import checkpoint_label, run_diagnostics
+
+    output = args.output_dir
+    output.mkdir(parents=True, exist_ok=True)
+    groups = load_groups(args.data)
+    records = [ScoreRecord.from_dict(row) for row in read_jsonl(args.predictions)]
+    per_epoch = {
+        checkpoint_label(path): [
+            ScoreRecord.from_dict(row) for row in read_jsonl(path)
+        ]
+        for path in (args.epoch_predictions or ())
+    }
+    report = run_diagnostics(
+        groups, records, per_epoch or None, listwise=bool(args.listwise)
+    )
+    write_json(output / "epistemic_diagnostics.json", report)
+    verdict = report["verdict"]
+    print(json.dumps(verdict, indent=2))
+    return 0 if verdict["epistemic_signal_supported"] else 2
+
+
+def _train_ppo_epistemic(args: argparse.Namespace) -> int:
+    from .data import load_groups as _load_groups
+    from .ppo_epistemic import RewardSpec, train_ppo
+
+    config = _config(args)
+    evaluation = _section(config, "evaluation")
+    ppo = _section(config, "ppo")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    save_resolved_config(config, args.output_dir)
+
+    spec = RewardSpec(
+        checkpoint=args.reward_checkpoint,
+        penalty=args.penalty,
+        lam=float(args.lam if args.lam is not None else ppo.get("lam", 1.0)),
+        mc_dropout=int(args.mc_dropout or 0),
+        batch_size=int(evaluation.get("batch_size", 16)),
+        max_length=int(evaluation.get("max_length", 512)),
+        local_files_only=bool(evaluation.get("local_files_only", False)),
+    )
+    train_ppo(
+        spec,
+        policy_model=args.policy or ppo.get("policy_model"),
+        dataset=_load_groups(args.data),
+        output_dir=args.output_dir,
+        trl_api=args.trl_api,
+        learning_rate=float(ppo.get("learning_rate", 1.41e-5)),
+        batch_size=int(ppo.get("batch_size", 64)),
+        mini_batch_size=int(ppo.get("mini_batch_size", 16)),
+        ppo_epochs=int(ppo.get("ppo_epochs", 4)),
+        kl_coef=float(ppo.get("kl_coef", 0.2)),
+        max_new_tokens=int(ppo.get("max_new_tokens", 128)),
+        seed=args.seed,
+        dtype=str(ppo.get("dtype", "float32")),
+        total_episodes=(
+            int(args.total_episodes)
+            if args.total_episodes is not None
+            else (int(ppo["total_episodes"]) if "total_episodes" in ppo else None)
+        ),
+    )
+    return 0
+
+
 def _evaluate_epistemic(args: argparse.Namespace) -> int:
     config = _config(args)
     output = args.output_dir
@@ -316,6 +417,7 @@ def _evaluate_epistemic(args: argparse.Namespace) -> int:
         batch_size=int(evaluation.get("batch_size", 16)),
         max_length=int(evaluation.get("max_length", 512)),
         local_files_only=bool(evaluation.get("local_files_only", False)),
+        mc_dropout=args.mc_dropout,
     )
     records = judge.score(groups)
     write_jsonl(output / "predictions.jsonl", records)
@@ -435,7 +537,78 @@ def build_parser() -> argparse.ArgumentParser:
     epistemic_train.add_argument("--seed", type=int, default=42)
     epistemic_train.add_argument("--head-count", type=int)
     epistemic_train.add_argument("--resume-from", type=Path)
+    epistemic_train.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"))
+    epistemic_train.add_argument("--epochs", type=int)
+    epistemic_train.add_argument("--batch-size", type=int)
+    epistemic_train.add_argument(
+        "--bootstrap-members",
+        action="store_true",
+        help="give each member an exact group-level bootstrap data view",
+    )
+    epistemic_train.add_argument(
+        "--feature-keep-fraction",
+        type=float,
+        help="fixed fraction of shared hidden features visible to each member",
+    )
+    epistemic_train.add_argument(
+        "--max-train-groups", type=int, help="cap groups for a smoke run"
+    )
+    epistemic_train.add_argument(
+        "--max-validation-groups", type=int, help="cap groups for a smoke run"
+    )
+    epistemic_train.add_argument(
+        "--lambda-div",
+        dest="lambda_div",
+        type=float,
+        help="decorrelation weight on head residuals; 0.0 reproduces the "
+             "previous objective exactly",
+    )
+    epistemic_train.add_argument(
+        "--mc-dropout",
+        dest="mc_dropout",
+        type=int,
+        help="stochastic passes per head at inference; 0 keeps deterministic scoring",
+    )
     epistemic_train.set_defaults(handler=_train_epistemic_judge)
+
+    diagnose = subparsers.add_parser("diagnose-epistemic")
+    _add_config_arguments(diagnose)
+    diagnose.add_argument("--data", type=Path, required=True)
+    diagnose.add_argument("--predictions", type=Path, required=True)
+    diagnose.add_argument(
+        "--epoch-predictions",
+        type=Path,
+        nargs="*",
+        help="one predictions file per epoch, in order, for the D3 check",
+    )
+    diagnose.add_argument("--output-dir", type=Path, required=True)
+    diagnose.add_argument(
+        "--listwise",
+        action="store_true",
+        help="diagnose ListNet outputs in within-group softmax(logit(score)) space",
+    )
+    diagnose.set_defaults(handler=_diagnose_epistemic)
+
+    ppo = subparsers.add_parser("train-ppo-epistemic")
+    _add_config_arguments(ppo)
+    ppo.add_argument("--data", type=Path, required=True)
+    ppo.add_argument("--reward-checkpoint", type=Path, required=True)
+    ppo.add_argument("--output-dir", type=Path, required=True)
+    ppo.add_argument("--policy")
+    ppo.add_argument(
+        "--penalty", choices=("none", "var", "credal"), default="credal"
+    )
+    ppo.add_argument("--lam", type=float)
+    ppo.add_argument("--mc-dropout", dest="mc_dropout", type=int)
+    ppo.add_argument("--trl-api", choices=("modern", "legacy"), default="modern")
+    ppo.add_argument(
+        "--total-episodes",
+        dest="total_episodes",
+        type=int,
+        help="cap PPO episodes; useful for smoke runs, leave unset for a real run",
+    )
+    ppo.add_argument("--seed", type=int, default=0)
+    ppo.set_defaults(handler=_train_ppo_epistemic)
 
     evaluate = subparsers.add_parser("evaluate")
     _add_config_arguments(evaluate)
@@ -458,6 +631,7 @@ def build_parser() -> argparse.ArgumentParser:
     epistemic_evaluate.add_argument("--model-name")
     epistemic_evaluate.add_argument("--loss", default="unknown")
     epistemic_evaluate.add_argument("--seed", type=int, default=42)
+    epistemic_evaluate.add_argument("--mc-dropout", type=int)
     epistemic_evaluate.set_defaults(handler=_evaluate_epistemic)
 
     aggregate = subparsers.add_parser("aggregate")
