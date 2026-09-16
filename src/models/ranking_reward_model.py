@@ -33,9 +33,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import (
     AutoModel, AutoTokenizer, AutoConfig,
-    BitsAndBytesConfig
+    BitsAndBytesConfig, __version__ as transformers_version
 )
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 
 # =============================================================================
@@ -180,6 +180,9 @@ class RankingRewardModel(nn.Module):
         dropout: float = 0.1,
         quantize_4bit: bool = False,
         pooling: Optional[str] = None,
+        revision: Optional[str] = None,
+        local_files_only: bool = False,
+        torch_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
         self.model_name = model_name
@@ -191,7 +194,14 @@ class RankingRewardModel(nn.Module):
             self.pooling_name = pooling
         
         # Load backbone
-        load_kwargs = {}
+        load_kwargs: Dict[str, Any] = {
+            "local_files_only": local_files_only,
+        }
+        if revision is not None:
+            load_kwargs["revision"] = revision
+        if torch_dtype is not None:
+            dtype_key = "dtype" if int(transformers_version.split(".", 1)[0]) >= 5 else "torch_dtype"
+            load_kwargs[dtype_key] = torch_dtype
         if quantize_4bit:
             load_kwargs["quantization_config"] = BitsAndBytesConfig(
                 load_in_4bit=True,
@@ -211,7 +221,12 @@ class RankingRewardModel(nn.Module):
         self.projection = ProjectionHead(hidden_size, dropout)
         
         # Tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tokenizer_kwargs: Dict[str, Any] = {
+            "local_files_only": local_files_only,
+        }
+        if revision is not None:
+            tokenizer_kwargs["revision"] = revision
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, **tokenizer_kwargs)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
     

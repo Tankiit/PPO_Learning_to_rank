@@ -1,0 +1,39 @@
+# Canonical Pythia configuration for the October ARR Tier-2 experiments.
+# Runtime paths are resolved from ARR_PYTHIA_MODEL_DIR on CRIL and may be
+# overridden explicitly by the CLI. No user, account, or home path is stored.
+
+model:
+  repo_id: EleutherAI/pythia-70m
+  revision: a39f36b100fe8a5377810d56c3f4789b9c53ac42
+  path: null
+  pooling: last
+
+data:
+  train: data/arr/ds_critique_qidsplit_train.jsonl
+  validation: data/arr/ds_critique_qidsplit_dev.jsonl
+
+training:
+  epochs: 50
+  max_length: 256
+  group_batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+  max_grad_norm: 1.0
+  checkpoint_epochs: [1, 10, 25, 50]
+
+experiment:
+  members: 5
+  head_dropout: 0.1
+  seeds: [42, 123, 777]
+  losses: [listnet, listmle, mse]
+  independent_arms: [independent, independent_bootstrap]
+  shared_arms:
+    - baseline
+    - bootstrap
+    - features
+    - bootstrap_features
+    - lambda_0p01
+    - lambda_0p1
+    - lambda_1

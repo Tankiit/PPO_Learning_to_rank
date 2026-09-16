@@ -108,7 +108,7 @@ def test_encoder_training_end_to_end(tmp_path):
     base=tmp_path/'tiny-deberta'; base.mkdir()
     vocab=base/'vocab.txt'
     vocab.write_text('[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\nq\ntext\n')
-    tokenizer=BertTokenizer(vocab=str(vocab)); tokenizer.save_pretrained(base)
+    tokenizer=BertTokenizer(vocab_file=str(vocab)); tokenizer.save_pretrained(base)
     model=DebertaV2ForSequenceClassification(DebertaV2Config(vocab_size=7,hidden_size=16,num_hidden_layers=1,num_attention_heads=2,intermediate_size=32,max_position_embeddings=64,num_labels=5))
     model.save_pretrained(base)
     gs=groups(6)
@@ -133,7 +133,7 @@ def test_decoder_single_mlp_mc_and_checkpoint_restore(tmp_path):
     from src.uncertainty_study.estimators import predict_checkpoint
     base=tmp_path/'tiny-decoder'; base.mkdir()
     vocab=base/'vocab.txt'; vocab.write_text('[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\nq\ntext\n')
-    BertTokenizer(vocab=str(vocab)).save_pretrained(base)
+    BertTokenizer(vocab_file=str(vocab)).save_pretrained(base)
     GPT2ForSequenceClassification(GPT2Config(vocab_size=7,n_embd=16,n_layer=1,n_head=2,n_positions=64,num_labels=1,pad_token_id=0)).save_pretrained(base)
     gs=groups(6); paths={}
     for split,selected in [('train',gs[:2]),('validation',gs[2:4]),('test',gs[4:])]:

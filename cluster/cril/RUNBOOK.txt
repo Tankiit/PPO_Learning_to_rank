@@ -1,0 +1,40 @@
+CRIL Pythia infrastructure runbook
+
+1. Connect:
+   ssh clustercril
+   ssh nodec000
+   cd "$HOME/PPO_Learning_to_rank_arr"
+
+2. Prepare and audit the fixed Pythia snapshot and the 216/54 QID split:
+   bash cluster/cril/prepare_pythia.sh
+
+3. Inspect the infrastructure preflight without creating a job:
+   bash cluster/cril/submit_pythia_preflight.sh --dry-run
+
+4. Submit the infrastructure-only H100 preflight:
+   bash cluster/cril/submit_pythia_preflight.sh --submit
+
+The preflight loads EleutherAI/pythia-70m fully offline and checks forward and
+backward passes through one shared backbone and five temporary scalar heads for
+ListNet, ListMLE, and MSE. It performs no scientific training and creates no
+experiment checkpoint.
+
+Do not use submit_uncertainty.sh: its current matrices are the separate
+DeBERTa/Mistral controlled-adaptation protocol.
+
+5. Validate and submit the six short Pythia Tier-2 pilots:
+   bash cluster/cril/submit_tier2_pilots.sh --dry-run
+   bash cluster/cril/submit_tier2_pilots.sh --submit
+
+The array covers an independent RankingRewardModel member and a complete
+shared-backbone/five-head model under ListNet, ListMLE, and MSE. Each cell uses
+eight training groups, four held-out groups, and one epoch. These are execution
+checks, not paper results.
+
+6. Inspect all six pilot manifests and logs. Only then validate the full matrix:
+   bash cluster/cril/submit_tier2_matrix.sh --dry-run
+
+Do not call the full launcher with --submit before this review. The full QID
+matrix contains 90 independent-member jobs and 63 shared-ablation jobs. Its
+independent combine array is dependency-gated and starts only after every
+independent member has completed.

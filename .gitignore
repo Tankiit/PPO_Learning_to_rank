@@ -18,6 +18,7 @@ experiments/**/visualizations/
 
 # Claude files
 .claude/
+.codex
 # Ignore Markdown files in any case
 *.md
 **/*.md
@@ -87,6 +88,7 @@ models/
 # Logs
 *.log
 logs/
+runs/
 
 # Temporary files
 tmp/
