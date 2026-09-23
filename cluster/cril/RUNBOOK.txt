@@ -54,3 +54,20 @@ and unmasked reference runs (117 runs total):
    sbatch cluster/cril/tier2_feature_aggregate.sbatch
 
 The JSON/CSV summary is written to runs/tier2_pythia/feature_sweep_analysis.
+
+8. Run the R4 GPT-4 exposure/data-dose matrix. The protocol treats GPT-4 as
+   the held-out provenance and crosses exposure {0%, 50%, 100% of training
+   QIDs} with nested training-QID fractions {25%, 50%, 100%}. Every training
+   group has nine candidates; the fixed evaluation contains only the three
+   GPT-4 candidates from each of 54 disjoint QIDs. Validate the arrays first:
+   bash cluster/cril/submit_r4_dose.sh --dry-run
+
+The exact qid100/exposure000 three-seed baseline is reused from the completed
+LOSO campaign, so the launcher submits the other eight cells only. It starts
+24 shared models and 120 independent members, then dependency-gates 24
+five-member ensemble combinations:
+   bash cluster/cril/submit_r4_dose.sh --submit
+
+Candidate replacement keeps group size and optimizer steps matched within a
+QID fraction, but changes the target-quality distribution. Report that
+limitation rather than attributing every dose effect solely to provenance.
