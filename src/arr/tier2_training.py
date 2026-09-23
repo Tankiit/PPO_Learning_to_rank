@@ -62,23 +62,35 @@ class SharedProjectionEnsemble(nn.Module):
         hidden_size: int,
         head_count: int = 5,
         dropout: float = 0.1,
-        feature_keep_fraction: float = 1.0,
+        feature_keep_fraction: float | None = 1.0,
+        feature_keep_count: int | None = None,
         feature_seed: int = 42,
     ) -> None:
         super().__init__()
         if head_count < 2:
             raise ValueError("a shared ensemble needs at least two heads")
-        if not 0.0 < feature_keep_fraction <= 1.0:
-            raise ValueError("feature_keep_fraction must lie in (0, 1]")
+        if feature_keep_count is None:
+            if feature_keep_fraction is None or not 0.0 < feature_keep_fraction <= 1.0:
+                raise ValueError("feature_keep_fraction must lie in (0, 1]")
+            keep = max(1, int(round(feature_keep_fraction * hidden_size)))
+            scale = 1.0 / feature_keep_fraction
+        else:
+            if (
+                isinstance(feature_keep_count, bool)
+                or not isinstance(feature_keep_count, int)
+                or feature_keep_count < 1
+            ):
+                raise ValueError("feature_keep_count must be a positive integer")
+            keep = min(hidden_size, feature_keep_count)
+            scale = hidden_size / keep
         self.heads = nn.ModuleList(
             [ProjectionHead(hidden_size, dropout=dropout) for _ in range(head_count)]
         )
         generator = torch.Generator().manual_seed(int(feature_seed))
         masks = torch.zeros((head_count, hidden_size), dtype=torch.float32)
-        keep = max(1, int(round(feature_keep_fraction * hidden_size)))
         for head_index in range(head_count):
             selected = torch.randperm(hidden_size, generator=generator)[:keep]
-            masks[head_index, selected] = 1.0 / feature_keep_fraction
+            masks[head_index, selected] = scale
         self.register_buffer("feature_masks", masks, persistent=True)
 
     @property
@@ -105,7 +117,8 @@ class SharedRankingRewardModel(nn.Module):
         head_count: int = 5,
         dropout: float = 0.1,
         pooling: str = "last",
-        feature_keep_fraction: float = 1.0,
+        feature_keep_fraction: float | None = 1.0,
+        feature_keep_count: int | None = None,
         feature_seed: int = 42,
         revision: str | None = None,
         local_files_only: bool = True,
@@ -129,6 +142,7 @@ class SharedRankingRewardModel(nn.Module):
             head_count=head_count,
             dropout=dropout,
             feature_keep_fraction=feature_keep_fraction,
+            feature_keep_count=feature_keep_count,
             feature_seed=feature_seed,
         )
 
@@ -373,6 +387,16 @@ def _load_model_state(model: nn.Module, path: Path) -> None:
 def _arm_settings(config: dict[str, Any]) -> dict[str, Any]:
     construction = str(config["construction"])
     arm = str(config["arm"])
+    feature_keep_count = config.get("feature_keep_count")
+    if feature_keep_count is not None:
+        if construction != "shared" or arm not in {"features", "bootstrap_features"}:
+            raise ValueError("feature_keep_count is only valid for shared feature-mask arms")
+        if (
+            isinstance(feature_keep_count, bool)
+            or not isinstance(feature_keep_count, int)
+            or feature_keep_count < 1
+        ):
+            raise ValueError("feature_keep_count must be a positive integer")
     if construction == "independent":
         if arm not in INDEPENDENT_ARMS:
             raise ValueError(f"unknown independent arm: {arm}")
@@ -384,9 +408,15 @@ def _arm_settings(config: dict[str, Any]) -> dict[str, Any]:
     if construction != "shared" or arm not in SHARED_ARMS:
         raise ValueError(f"unknown shared arm: {arm}")
     lambdas = {"lambda_0p01": 0.01, "lambda_0p1": 0.1, "lambda_1": 1.0}
+    if feature_keep_count is not None:
+        feature_keep_fraction = None
+    elif "features" in arm:
+        feature_keep_fraction = 0.8
+    else:
+        feature_keep_fraction = 1.0
     return {
         "bootstrap": arm in {"bootstrap", "bootstrap_features"},
-        "feature_keep_fraction": 0.8 if "features" in arm else 1.0,
+        "feature_keep_fraction": feature_keep_fraction,
         "decorrelation_lambda": lambdas.get(arm, 0.0),
     }
 
@@ -474,7 +504,11 @@ def _build_model(config: dict[str, Any]) -> tuple[nn.Module, Any, int]:
         model = SharedRankingRewardModel(
             **common,
             head_count=int(config["head_count"]),
-            feature_keep_fraction=float(config["feature_keep_fraction"]),
+            feature_keep_fraction=(
+                None if config["feature_keep_fraction"] is None
+                else float(config["feature_keep_fraction"])
+            ),
+            feature_keep_count=config.get("feature_keep_count"),
             feature_seed=int(
                 stable_seed("arr-tier2-features-v1", global_seed) % (2**63 - 1)
             ),
@@ -602,10 +636,21 @@ def train_tier2(config: dict[str, Any], output_dir: str | Path) -> dict[str, Any
         "loss_score_space": "raw_scalar_output",
         "prediction_spaces": ["raw", "sigmoid", "within_group_softmax"],
         "fixed_bootstrap": bool(config["bootstrap"]),
-        "feature_keep_fraction": float(config["feature_keep_fraction"]),
+        "feature_keep_fraction": config["feature_keep_fraction"],
         "decorrelation_lambda": float(config["decorrelation_lambda"]),
         "started_at_unix": time.time(),
     }
+    if config.get("feature_keep_count") is not None:
+        mask = model.projection.feature_masks[0]
+        actual_count = int((mask > 0).sum().item())
+        manifest.update(
+            {
+                "feature_keep_count_requested": int(config["feature_keep_count"]),
+                "feature_keep_count_effective": actual_count,
+                "feature_keep_fraction_effective": actual_count / mask.numel(),
+                "feature_mask_scale": float(mask.max().item()),
+            }
+        )
     write_json(output / "run_manifest.json", manifest)
 
     try:

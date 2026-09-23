@@ -72,7 +72,36 @@ def test_projection_members_and_feature_masks_are_distinct_and_trainable():
     assert scores.shape == (4, 5)
     scores.square().mean().backward()
     assert representation.grad is not None
-    assert all(any(parameter.grad is not None for parameter in head.parameters()) for head in ensemble.heads)
+    assert all(
+        any(parameter.grad is not None for parameter in head.parameters())
+        for head in ensemble.heads
+    )
+
+
+def test_fixed_count_feature_masks_use_min_dimension_and_rescale():
+    ensemble = SharedProjectionEnsemble(
+        hidden_size=20,
+        head_count=5,
+        dropout=0.0,
+        feature_keep_count=7,
+        feature_seed=7,
+    )
+    assert torch.equal(
+        (ensemble.feature_masks > 0).sum(dim=1), torch.full((5,), 7)
+    )
+    assert torch.allclose(
+        ensemble.feature_masks.max(dim=1).values,
+        torch.full((5,), 20 / 7),
+    )
+
+    clipped = SharedProjectionEnsemble(
+        hidden_size=8,
+        head_count=2,
+        dropout=0.0,
+        feature_keep_count=20,
+        feature_seed=7,
+    )
+    assert torch.equal(clipped.feature_masks, torch.ones((2, 8)))
 
 
 def test_grouped_loss_updates_every_head():
@@ -106,6 +135,20 @@ def test_config_resolves_all_shared_ablation_controls():
     assert not features["bootstrap"]
     decorated = validate_config(_config(arm="lambda_0p1"))
     assert decorated["decorrelation_lambda"] == 0.1
+
+    fixed_count = validate_config(_config(arm="features", feature_keep_count=40))
+    assert fixed_count["feature_keep_count"] == 40
+    assert fixed_count["feature_keep_fraction"] is None
+
+
+def test_fixed_count_masks_are_restricted_to_feature_arms():
+    for arm in ("baseline", "lambda_1"):
+        try:
+            validate_config(_config(arm=arm, feature_keep_count=40))
+        except ValueError as exc:
+            assert "only valid for shared feature-mask arms" in str(exc)
+        else:
+            raise AssertionError(f"feature_keep_count unexpectedly accepted for {arm}")
 
 
 def test_independent_configuration_requires_a_member():

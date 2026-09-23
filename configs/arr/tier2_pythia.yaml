@@ -37,3 +37,6 @@ experiment:
     - lambda_0p01
     - lambda_0p1
     - lambda_1
+  # Fixed-count mask sweep. Each head retains min(hidden_size, k) dimensions.
+  # The existing features arms retain 80% when --feature-keep-count is omitted.
+  feature_keep_counts: [20, 100, 180, 260, 340]

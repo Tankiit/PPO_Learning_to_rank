@@ -55,6 +55,11 @@ def _base_config(args: argparse.Namespace) -> dict[str, Any]:
         "max_train_groups": args.max_train_groups,
         "max_validation_groups": args.max_validation_groups,
     }
+    # Keep the historical configuration fingerprint unchanged when this new
+    # ablation is not requested. This lets completed 80%-mask runs remain
+    # idempotently reusable after adding the fixed-count sweep.
+    if args.feature_keep_count is not None:
+        config["feature_keep_count"] = args.feature_keep_count
     if args.pilot:
         config.update(
             {
@@ -126,6 +131,14 @@ def _add_training_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--max-train-groups", type=int)
     parser.add_argument("--max-validation-groups", type=int)
+    parser.add_argument(
+        "--feature-keep-count",
+        type=int,
+        help=(
+            "fixed number k of backbone dimensions retained by each head; "
+            "valid only for shared features/bootstrap_features arms"
+        ),
+    )
     parser.add_argument("--pilot", action="store_true")
 
 

@@ -38,3 +38,19 @@ Do not call the full launcher with --submit before this review. The full QID
 matrix contains 90 independent-member jobs and 63 shared-ablation jobs. Its
 independent combine array is dependency-gated and starts only after every
 independent member has completed.
+
+7. Run the fixed-count feature-mask ablation after the original 80%-retention
+   feature arms. It retains k in {20, 100, 180, 260, 340} dimensions per head for both
+   `features` and `bootstrap_features`, all three objectives and all three seeds:
+   bash cluster/cril/submit_tier2_feature_sweep.sh --dry-run
+   bash cluster/cril/submit_tier2_feature_sweep.sh --pilot
+
+Inspect the pilot manifest and logs, then submit the full 90-cell array:
+   bash cluster/cril/submit_tier2_feature_sweep.sh --submit
+
+After all 90 array tasks complete, run the strict aggregation. It refuses any
+missing/incomplete cell and compares the sweep with the existing 80%-retention
+and unmasked reference runs (117 runs total):
+   sbatch cluster/cril/tier2_feature_aggregate.sbatch
+
+The JSON/CSV summary is written to runs/tier2_pythia/feature_sweep_analysis.
